@@ -3,6 +3,20 @@ from __future__ import unicode_literals
 import threading
 import json
 import logging
+import pytz
+import re
+from datetime import datetime
+from collections import namedtuple
+
+History = namedtuple('History', [
+    'updated',
+    'field',
+    'from_project',
+    'to_project',
+    'from_squad',
+    'to_squad',
+    'timezone'
+])
 
 
 class CaseInsensitiveDict(dict):
@@ -28,7 +42,7 @@ class CaseInsensitiveDict(dict):
     For example, ``headers['content-encoding']`` will return the
     value of a ``'Content-Encoding'`` response header, regardless
     of how the header name was originally stored.
-C
+    
     If the constructor, ``.update``, or equality comparison
     operations are given keys that have equal ``.lower()``s, the
     behavior is undefined.
@@ -191,3 +205,14 @@ def get_error_list(r):
             except ValueError:
                 error_list = [r.text]
     return error_list
+
+
+def get_utc(date_string, timezone):
+    # stip everything after seconds.
+    print('date string : {} {} type: {}'.format(date_string, timezone, type(date_string)))
+    date_string = re.sub(r':\d{2}\..*$', '', date_string)
+    local = pytz.timezone(timezone)
+    naive = datetime.strptime(date_string, "%Y-%m-%dT%H:%M")
+    local_dt = local.localize(naive, is_dst=None)
+    utc_dt = local_dt.astimezone(pytz.utc)
+    return utc_dt
