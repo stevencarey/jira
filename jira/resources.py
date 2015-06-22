@@ -6,14 +6,14 @@ This module implements the Resource classes that translate JSON from JIRA REST r
 into usable objects.
 """
 
-import collections
 import re
 import logging
 import json
+from datetime import datetime
 
 from six import iteritems, string_types, text_type
 
-from .utils import threaded_requests, json_loads, get_error_list, CaseInsensitiveDict
+from .utils import threaded_requests, json_loads, get_error_list, CaseInsensitiveDict, History, get_utc
 
 
 class Resource(object):
@@ -377,6 +377,79 @@ class Issue(Resource):
 
     def __eq__(self, other):
         return self.id == other.id
+
+    def get_histories(self):
+        return self.changelog.histories
+
+    def is_indigenous(self):
+        """
+        Was created on the board the issue currently resides on.
+        """
+
+        findings = []
+        for history in self.get_histories(self):
+            for item in history.items:
+                if all([
+                    item.field == 'Squad',
+                    item.toString == 'Partner Engineering Triage'
+                ]):
+                    findings.append(False)
+                else:
+                    findings.append(True)
+        return False if not all(findings) else True
+
+    def get_project_moves(self):
+        for history in self.get_histories():
+            date_updated = history.created
+
+            for item in history.items:
+                h = {}
+                h['updated'] = date_updated if date_updated else None
+                h['field'] = item.field if item.field else None
+                h['from_project'] = item.fromString if item.field == 'project' and item.fromString else None
+                h['to_project'] = item.toString if item.field == 'project' and item.toString else None
+                h['from_squad'] = item.fromString if item.field == 'Squad' and item.fromString else None
+                h['to_squad'] = item.toString if item.field == 'Squad' and item.toString else None
+                h['timezone'] = history.author.timeZone
+                yield History(**h)
+
+    def get_triage_entry_time(self):
+        if self.is_indigenous():
+            time_arr_in_triage = get_utc(self.fields.created, self.fields.creator.timeZone)
+        else:
+            histories = self.get_project_moves()
+
+            time_arr_in_triage = [get_utc(history.updated, history.timezone) for history in histories if all([
+                history.field == 'Squad',
+                history.from_squad != 'Partner Engineering Triage',
+                history.to_squad == 'Partner Engineering Triage'
+            ])]
+
+        return time_arr_in_triage[0]
+
+    def get_triage_exit_time(self):
+        histories = self.get_project_moves()
+        t = [get_utc(history.updated, history.timezone) for history in histories if all([
+            history.field == 'Squad',
+            history.from_squad == 'Partner Engineering Triage',
+            history.to_squad != 'Partner Engineering Triage'
+        ])]
+        return t[0]
+
+    def get_triage_duration(self):
+        current_squad = self.fields.customfield_11100.value
+        if current_squad != "Partner Engineering Triage":
+            dt_entered_triage = self.get_triage_entry_time(self)
+            dt_exited_triage = self.get_triage_exit_time(self)
+            delta = dt_exited_triage - dt_entered_triage
+
+        else:
+            dt_created, timezone = self.fields.created, self.fields.reporter.timeZone
+            now = datetime.now()
+            now = now.strftime("%Y-%m-%dT%H:%M")
+            delta = get_utc(now, timezone) - get_utc(dt_created, timezone)
+
+        return delta
 
 
 class Comment(Resource):
