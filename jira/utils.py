@@ -8,13 +8,23 @@ import re
 from datetime import datetime
 from collections import namedtuple
 
-History = namedtuple('History', [
+IssueHistory = namedtuple('IssueHistory', [
+    'id',
+    'fda',
+    'author',
+    'author_email',
+    'author_display_name',
+    'user_active',
     'updated',
     'field',
     'from_project',
     'to_project',
     'from_squad',
     'to_squad',
+    'from_assignee',
+    'to_assignee',
+    'from_status',
+    'to_status',
     'timezone'
 ])
 
@@ -42,7 +52,7 @@ class CaseInsensitiveDict(dict):
     For example, ``headers['content-encoding']`` will return the
     value of a ``'Content-Encoding'`` response header, regardless
     of how the header name was originally stored.
-    
+
     If the constructor, ``.update``, or equality comparison
     operations are given keys that have equal ``.lower()``s, the
     behavior is undefined.
@@ -207,12 +217,18 @@ def get_error_list(r):
     return error_list
 
 
-def get_utc(date_string, timezone):
+def make_naive_datetime(date_string):
     # stip everything after seconds.
-    print('date string : {} {} type: {}'.format(date_string, timezone, type(date_string)))
-    date_string = re.sub(r':\d{2}\..*$', '', date_string)
+    dt = re.sub(r':\d{2}\..*$', '', date_string)
+    return datetime.strptime(dt, "%Y-%m-%dT%H:%M")
+
+
+def get_utc(date_string, timezone):
+    if isinstance(date_string, datetime):
+        date_string = datetime.strftime(date_string, "%Y-%m-%dT%H:%M")
+
+    naive = make_naive_datetime(date_string)
     local = pytz.timezone(timezone)
-    naive = datetime.strptime(date_string, "%Y-%m-%dT%H:%M")
     local_dt = local.localize(naive, is_dst=None)
     utc_dt = local_dt.astimezone(pytz.utc)
     return utc_dt
