@@ -10,10 +10,10 @@ import re
 import logging
 import json
 from datetime import datetime
-
+from operator import attrgetter
 from six import iteritems, string_types, text_type
 
-from .utils import threaded_requests, json_loads, get_error_list, CaseInsensitiveDict, History, get_utc
+from .utils import threaded_requests, json_loads, get_error_list, CaseInsensitiveDict, IssueHistory, get_utc
 
 
 class Resource(object):
@@ -115,6 +115,9 @@ class Resource(object):
     #     self._parse_raw(raw_pickled)
     #
 
+    # Create @staticmethod that returns a changelog object with histories, items etc.
+    # perhaps not even staticmethod. self.get_changelog raise JiraError.self
+    # You could also use the dict2resource at the bottom of this file.
     def find(self, id, params=None):
 
         if params is None:
@@ -242,8 +245,8 @@ class Resource(object):
         dict2resource(raw, self, self._options, self._session)
 
     def _default_headers(self, user_headers):
-        #result = dict(user_headers)
-        #esult['accept'] = 'application/json'
+        # result = dict(user_headers)
+        # esult['accept'] = 'application/json'
         return CaseInsensitiveDict(self._options['headers'].items() + user_headers.items())
 
 
@@ -378,70 +381,131 @@ class Issue(Resource):
     def __eq__(self, other):
         return self.id == other.id
 
-    def get_histories(self):
-        return self.changelog.histories
+    def _get_changelog(self):
+        try:
+            if self.changelog is not None:
+                return self.changelog
+        except Exception:
+            Exception('No changelog found. Did you pass "expand=changelog" when searching for this issue?')
 
-    def is_indigenous(self):
+    def _get_histories(self):
+        changelog = self._get_changelog()
+        histories = changelog.histories
+        return histories  # if changelog.histories is not None else None
+
+    def current_squad(self):
+        return self.fields.customfield_11100
+
+    def is_native(self):
         """
-        Was created on the board the issue currently resides on.
+        Check if the issue was created on the current board or if
+        if was moved from another board to the current board.
         """
 
         findings = []
-        for history in self.get_histories(self):
-            for item in history.items:
-                if all([
-                    item.field == 'Squad',
-                    item.toString == 'Partner Engineering Triage'
-                ]):
-                    findings.append(False)
-                else:
-                    findings.append(True)
-        return False if not all(findings) else True
+        histories = self.get_issue_changelog()
 
-    def get_project_moves(self):
-        for history in self.get_histories():
-            date_updated = history.created
+        # if there are histories
+        if histories is not None:
+            for history in histories:
 
-            for item in history.items:
-                h = {}
-                h['updated'] = date_updated if date_updated else None
-                h['field'] = item.field if item.field else None
-                h['from_project'] = item.fromString if item.field == 'project' and item.fromString else None
-                h['to_project'] = item.toString if item.field == 'project' and item.toString else None
-                h['from_squad'] = item.fromString if item.field == 'Squad' and item.fromString else None
-                h['to_squad'] = item.toString if item.field == 'Squad' and item.toString else None
-                h['timezone'] = history.author.timeZone
-                yield History(**h)
+                # issue has been moved to squad.
+                moved_to_squad = [
+                    history.field == 'Squad',
+                    history.to_squad == self.current_squad()
+                ]
 
-    def get_triage_entry_time(self):
-        if self.is_indigenous():
-            time_arr_in_triage = get_utc(self.fields.created, self.fields.creator.timeZone)
+                findings.append(True if not all(moved_to_squad) else False)
+
+            print('is_native: {}'.format(not any(findings)))
+            return not any(findings)
+
         else:
-            histories = self.get_project_moves()
+            # if there are no histories, issue must have been created on current board.
+            print('is_native: {}'.format(True))
+            return True
 
-            time_arr_in_triage = [get_utc(history.updated, history.timezone) for history in histories if all([
+    def get_issue_changelog(self):
+        if self._get_histories() is not None:
+            for history in self._get_histories():
+                timezone = history.author.timeZone
+                date_updated = get_utc(history.created, timezone)
+
+                for history_item in history.items:
+                    h = {}
+                    h['id'] = history.id if history.id else None
+                    h['fda'] = self.key
+                    h['author'] = history.author.displayName if history.author.displayName else None
+                    h['author_email'] = history.author.emailAddress if history.author.emailAddress else None
+                    h['author_display_name'] = history.author.displayName if history.author.displayName else None
+                    h['user_active'] = history.author.active if history.author.active else None
+                    h['updated'] = date_updated if date_updated else None  # time the change was made.
+                    h['field'] = history_item.field if history_item.field else None
+                    h['from_project'] = history_item.fromString if history_item.field == 'project' and history_item.fromString else None
+                    h['to_project'] = history_item.toString if history_item.field == 'project' and history_item.toString else None
+                    h['from_squad'] = history_item.fromString if history_item.field == 'Squad' and history_item.fromString else None
+                    h['to_squad'] = history_item.toString if history_item.field == 'Squad' and history_item.toString else None
+                    h['from_assignee'] = history_item.fromString if history_item.field == 'Assignee' and history_item.fromString else None
+                    h['to_assignee'] = history_item.toString if history_item.field == 'Assignee' and history_item.toString else None
+                    h['from_status'] = history_item.fromString if history_item.field == 'Status' and history_item.fromString else None
+                    h['to_status'] = history_item.toString if history_item.field == 'Status' and history_item.toString else None
+                    h['timezone'] = timezone
+                    yield IssueHistory(**h)
+        else:
+            yield None
+
+    def get_board_entry_time(self, squad):
+        # squad is a string eg 'Partner Engineering Triage'
+        """
+        What if there is more than one date?
+        i.e issue moves back to squad after leaving.
+        """
+
+        histories = self.get_issue_changelog()
+        if self.is_native():
+            arrival_time = get_utc(self.fields.created, self.fields.creator.timeZone)
+
+        elif not self.is_native() and histories is not None:
+
+            arrival_time = [get_utc(history.updated, history.timezone) for history in histories if all([
                 history.field == 'Squad',
-                history.from_squad != 'Partner Engineering Triage',
-                history.to_squad == 'Partner Engineering Triage'
+                history.from_squad == squad,
+                history.to_squad != squad
             ])]
 
-        return time_arr_in_triage[0]
+        else:
+            arrival_time = [get_utc(history.updated, history.timezone) for history in histories if all([
+                history.field == 'Squad',
+                history.from_squad != squad,
+                history.to_squad == squad
+            ])]
 
-    def get_triage_exit_time(self):
-        histories = self.get_project_moves()
-        t = [get_utc(history.updated, history.timezone) for history in histories if all([
-            history.field == 'Squad',
-            history.from_squad == 'Partner Engineering Triage',
-            history.to_squad != 'Partner Engineering Triage'
-        ])]
-        return t[0]
+        return arrival_time[0]
 
-    def get_triage_duration(self):
+    # TODO: make IssueHistoy a class for the func below?
+    # def has_left_squad(self, squad):
+    #     return all([self.field == 'Squad',
+    #                 self.from_squad == squad,
+    #                 self.to_squad != squad])
+
+    def get_board_exit_time(self, squad):
+        """
+        What if there is more than one date?
+        """
+        histories = self.get_issue_changelog()
+        for history in histories:
+            if all([history.field == 'Squad', history.from_squad == squad, history.to_squad != squad]):
+                exit = get_utc(history.updated, history.timezone)
+                # print('History : {}'.format(history))
+                return exit
+
+    def get_board_duration(self, squad):
+        """ How long has the issue been on the squad's board."""
         current_squad = self.fields.customfield_11100.value
-        if current_squad != "Partner Engineering Triage":
-            dt_entered_triage = self.get_triage_entry_time(self)
-            dt_exited_triage = self.get_triage_exit_time(self)
-            delta = dt_exited_triage - dt_entered_triage
+        if current_squad != squad:
+            entered = self.get_board_entry_time(self)
+            exited = self.get_board_exit_time(self)
+            delta = exited - entered
 
         else:
             dt_created, timezone = self.fields.created, self.fields.reporter.timeZone
@@ -450,6 +514,30 @@ class Issue(Resource):
             delta = get_utc(now, timezone) - get_utc(dt_created, timezone)
 
         return delta
+
+    def last_updated_by(self):
+        s = sorted(self.get_issue_changelog(), key=attrgetter('updated'))
+        last = s.pop()
+        return last.author_display_name
+
+    def get_assignee(self):
+        """ Display name of current assignee. """
+        return self.fields.assignee.displayName
+
+    def seen_by_squad(self, squad):
+        """
+        Has the issue been on `squad` board?
+
+        """
+
+        if self.is_native():
+            return True
+        else:
+            # check the changelog for squad moves.
+            changelog = self.get_issue_changelog()
+            if changelog is not None:
+                return any([change.field == 'Squad', change.from_squad == squad, change.to_squad == squad] for change in changelog)
+            return False
 
 
 class Comment(Resource):
