@@ -218,17 +218,22 @@ def get_error_list(r):
 
 
 def make_naive_datetime(date_string):
+    print('Naive datetime {}, type: {}'.format(date_string, type(date_string)))
     # stip everything after seconds.
     dt = re.sub(r':\d{2}\..*$', '', date_string)
+    # return datetime object
     return datetime.strptime(dt, "%Y-%m-%dT%H:%M")
 
 
 def get_utc(date_string, timezone):
-    if isinstance(date_string, datetime):
-        date_string = datetime.strftime(date_string, "%Y-%m-%dT%H:%M")
+    # if isinstance(date_string, datetime):
+    #     print('DateTime found')
+    # date_string = datetime.strftime(date_string, "%Y-%m-%dT%H:%M")
 
+    print('{} {}'.format(date_string, timezone))
     naive = make_naive_datetime(date_string)
     local = pytz.timezone(timezone)
     local_dt = local.localize(naive, is_dst=None)
     utc_dt = local_dt.astimezone(pytz.utc)
+    print('utc datetime : {} type : {}'.format(utc_dt, type(utc_dt)))
     return utc_dt

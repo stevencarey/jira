@@ -464,23 +464,29 @@ class Issue(Resource):
         histories = self.get_issue_changelog()
         if self.is_native():
             arrival_time = get_utc(self.fields.created, self.fields.creator.timeZone)
+            print('is native')
 
         elif not self.is_native() and histories is not None:
-
+            print('is not native')
+            # below, get_utc is passed a datetime 'history.updated', but should get a string.
+            # I don't thing i should have to pass these to get_utc again, as they are already processed
+            # in get issue changelog.
             arrival_time = [get_utc(history.updated, history.timezone) for history in histories if all([
                 history.field == 'Squad',
                 history.from_squad == squad,
                 history.to_squad != squad
             ])]
 
-        else:
-            arrival_time = [get_utc(history.updated, history.timezone) for history in histories if all([
-                history.field == 'Squad',
-                history.from_squad != squad,
-                history.to_squad == squad
-            ])]
+        # else:
+        #     arrival_time = [get_utc(history.updated, history.timezone) for history in histories if all([
+        #         history.field == 'Squad',
+        #         history.from_squad != squad,
+        #         history.to_squad == squad
+        #     ])]
+        print('arrival time bub : ', arrival_time)
 
         return arrival_time[0]
+
 
     # TODO: make IssueHistoy a class for the func below?
     # def has_left_squad(self, squad):
