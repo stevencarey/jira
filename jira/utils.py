@@ -11,11 +11,13 @@ from collections import namedtuple
 IssueHistory = namedtuple('IssueHistory', [
     'id',
     'fda',
+    'dt_issue_created',
+    'creator_timezone',
     'author',
     'author_email',
     'author_display_name',
     'user_active',
-    'updated',
+    'created',
     'field',
     'from_project',
     'to_project',
@@ -218,22 +220,28 @@ def get_error_list(r):
 
 
 def make_naive_datetime(date_string):
-    print('Naive datetime {}, type: {}'.format(date_string, type(date_string)))
-    # stip everything after seconds.
-    dt = re.sub(r':\d{2}\..*$', '', date_string)
-    # return datetime object
-    return datetime.strptime(dt, "%Y-%m-%dT%H:%M")
+    
+    try:
+        # convert datetime to string.
+        dt = datetime.strftime(date_string, "%Y-%m-%dT%H:%M") # return string
+
+        # stip everything after seconds. ie all +HH:MM for timezone.
+        dt = re.sub(r':\d{2}\..*$', '', dt)
+
+    except TypeError as e:
+        print('TypeError: {}'.format(e))
+        dt = re.sub(r':\d{2}\..*$', '', date_string)
+
+    return datetime.strptime(dt, "%Y-%m-%dT%H:%M") # return object
 
 
 def get_utc(date_string, timezone):
-    # if isinstance(date_string, datetime):
-    #     print('DateTime found')
-    # date_string = datetime.strftime(date_string, "%Y-%m-%dT%H:%M")
-
-    print('{} {}'.format(date_string, timezone))
+    '''
+    :type date_string str
+    :rtype datetime
+    '''
     naive = make_naive_datetime(date_string)
     local = pytz.timezone(timezone)
-    local_dt = local.localize(naive, is_dst=None)
+    local_dt = local.localize(naive, is_dst=None) # localize takes datetime obj
     utc_dt = local_dt.astimezone(pytz.utc)
-    print('utc datetime : {} type : {}'.format(utc_dt, type(utc_dt)))
     return utc_dt

@@ -101,7 +101,8 @@ class Resource(object):
             if hasattr(self, 'raw') and item in self.raw:
                 return self.raw[item]
             else:
-                raise AttributeError("%r object has no attribute %r" % (self.__class__, item))
+                raise AttributeError(
+                    "%r object has no attribute %r" % (self.__class__, item))
     # def __getstate__(self):
     #     """
     #     Pickling the resource; using the raw dict
@@ -385,16 +386,17 @@ class Issue(Resource):
         try:
             if self.changelog is not None:
                 return self.changelog
-        except Exception:
-            Exception('No changelog found. Did you pass "expand=changelog" when searching for this issue?')
+        except AttributeError:
+            AttributeError('No changelog found. Did you pass \
+                "expand=changelog" when searching for this issue?')
 
     def _get_histories(self):
         changelog = self._get_changelog()
         histories = changelog.histories
-        return histories  # if changelog.histories is not None else None
+        return histories if changelog.histories != [] else None
 
     def current_squad(self):
-        return self.fields.customfield_11100
+        return self.fields.customfield_11100.value
 
     def is_native(self):
         """
@@ -405,41 +407,37 @@ class Issue(Resource):
         findings = []
         histories = self.get_issue_changelog()
 
-        # if there are histories
         if histories is not None:
             for history in histories:
 
-                # issue has been moved to squad.
                 moved_to_squad = [
                     history.field == 'Squad',
                     history.to_squad == self.current_squad()
                 ]
 
-                findings.append(True if not all(moved_to_squad) else False)
+                findings.append(False if all(moved_to_squad) else True)
 
-            print('is_native: {}'.format(not any(findings)))
-            return not any(findings)
-
-        else:
-            # if there are no histories, issue must have been created on current board.
-            print('is_native: {}'.format(True))
-            return True
+        return not any(findings)
 
     def get_issue_changelog(self):
         if self._get_histories() is not None:
             for history in self._get_histories():
                 timezone = history.author.timeZone
-                date_updated = get_utc(history.created, timezone)
+                created = get_utc(history.created, timezone)
+                original_issue_created = get_utc(self.fields.created, self.fields.creator.timeZone)
 
                 for history_item in history.items:
                     h = {}
                     h['id'] = history.id if history.id else None
                     h['fda'] = self.key
+                    h['dt_issue_created'] = original_issue_created if original_issue_created else None
+                    h['creator_timezone'] = self.fields.creator.timeZone if self.fields.creator.timeZone else None
                     h['author'] = history.author.displayName if history.author.displayName else None
                     h['author_email'] = history.author.emailAddress if history.author.emailAddress else None
                     h['author_display_name'] = history.author.displayName if history.author.displayName else None
                     h['user_active'] = history.author.active if history.author.active else None
-                    h['updated'] = date_updated if date_updated else None  # time the change was made.
+                    # time the change was made.
+                    h['created'] = created if created else None
                     h['field'] = history_item.field if history_item.field else None
                     h['from_project'] = history_item.fromString if history_item.field == 'project' and history_item.fromString else None
                     h['to_project'] = history_item.toString if history_item.field == 'project' and history_item.toString else None
@@ -455,54 +453,36 @@ class Issue(Resource):
             yield None
 
     def get_board_entry_time(self, squad):
-        # squad is a string eg 'Partner Engineering Triage'
-        """
-        What if there is more than one date?
-        i.e issue moves back to squad after leaving.
-        """
 
         histories = self.get_issue_changelog()
+
         if self.is_native():
+            # time created on original board.
             arrival_time = get_utc(self.fields.created, self.fields.creator.timeZone)
-            print('is native')
 
         elif not self.is_native() and histories is not None:
-            print('is not native')
-            # below, get_utc is passed a datetime 'history.updated', but should get a string.
-            # I don't thing i should have to pass these to get_utc again, as they are already processed
-            # in get issue changelog.
-            arrival_time = [get_utc(history.updated, history.timezone) for history in histories if all([
+
+            # time issue was moved to 'squad'.
+            # No way of determining the time an issue arrived in triage.
+            # We can see issues moving from triage and the time it happened,
+            # but no way of telling what time the issue was created in triage.
+
+            # So, if the issue is not native to current squad and number of squad moves
+            # where 'from_squad' == squad is 1, we can assume the date of original creation
+            # is when the issue arrived in triage.
+
+            arrival_time = [get_utc(history.dt_issue_created, history.creator_timezone) for num, history in enumerate(histories, 1) if all([
                 history.field == 'Squad',
-                history.from_squad == squad,
-                history.to_squad != squad
-            ])]
+                history.from_squad == squad])][0]
+            return arrival_time
 
-        # else:
-        #     arrival_time = [get_utc(history.updated, history.timezone) for history in histories if all([
-        #         history.field == 'Squad',
-        #         history.from_squad != squad,
-        #         history.to_squad == squad
-        #     ])]
-        print('arrival time bub : ', arrival_time)
-
-        return arrival_time[0]
-
-
-    # TODO: make IssueHistoy a class for the func below?
-    # def has_left_squad(self, squad):
-    #     return all([self.field == 'Squad',
-    #                 self.from_squad == squad,
-    #                 self.to_squad != squad])
 
     def get_board_exit_time(self, squad):
-        """
-        What if there is more than one date?
-        """
+
         histories = self.get_issue_changelog()
         for history in histories:
             if all([history.field == 'Squad', history.from_squad == squad, history.to_squad != squad]):
-                exit = get_utc(history.updated, history.timezone)
-                # print('History : {}'.format(history))
+                exit = get_utc(history.created, history.timezone)
                 return exit
 
     def get_board_duration(self, squad):
@@ -535,15 +515,22 @@ class Issue(Resource):
         Has the issue been on `squad` board?
 
         """
+        findings = []
+        # check the changelog for squad moves.
+        changelog = self.get_issue_changelog()
 
-        if self.is_native():
-            return True
-        else:
-            # check the changelog for squad moves.
-            changelog = self.get_issue_changelog()
-            if changelog is not None:
-                return any([change.field == 'Squad', change.from_squad == squad, change.to_squad == squad] for change in changelog)
-            return False
+        try:
+            for change in changelog:
+                print(change.field, change.from_squad, change.to_squad)
+                seen = all([
+                    change.field == 'Squad',
+                    change.from_squad == squad or change.to_squad == squad])
+
+                findings.append(True if seen else False)
+        except:
+            findings = [True if squad == self.current_squad() else False]
+
+        return any(findings)
 
 
 class Comment(Resource):
@@ -557,11 +544,11 @@ class Comment(Resource):
 
     def update(self, fields=None, async=None, jira=None, body='', visibility=None):
         # TODO: fix the Resource.update() override mess
-        data = {}
+        data={}
         if body:
-            data['body'] = body
+            data['body']=body
         if visibility:
-            data['visibility'] = visibility
+            data['visibility']=visibility
         super(Comment, self).update(data)
 
 
@@ -586,15 +573,15 @@ class RemoteLink(Resource):
         :param application: application information for the link (see the above link for details)
         :param relationship: relationship description for the link (see the above link for details)
         """
-        data = {
+        data={
             'object': object
         }
         if globalId is not None:
-            data['globalId'] = globalId
+            data['globalId']=globalId
         if application is not None:
-            data['application'] = application
+            data['application']=application
         if relationship is not None:
-            data['relationship'] = relationship
+            data['relationship']=relationship
 
         super(RemoteLink, self).update(**data)
 
@@ -629,7 +616,7 @@ class TimeTracking(Resource):
 
     def __init__(self, options, session, raw=None):
         Resource.__init__(self, 'issue/{0}/worklog/{1}', options, session)
-        self.remainingEstimate = None
+        self.remainingEstimate=None
         if raw:
             self._parse_raw(raw)
 
@@ -652,13 +639,13 @@ class Worklog(Resource):
         :param newEstimate: combined with ``adjustEstimate=new``, set the estimate to this value
         :param increaseBy: combined with ``adjustEstimate=manual``, increase the remaining estimate by this amount
         """
-        params = {}
+        params={}
         if adjustEstimate is not None:
-            params['adjustEstimate'] = adjustEstimate
+            params['adjustEstimate']=adjustEstimate
         if newEstimate is not None:
-            params['newEstimate'] = newEstimate
+            params['newEstimate']=newEstimate
         if increaseBy is not None:
-            params['increaseBy'] = increaseBy
+            params['increaseBy']=increaseBy
 
         super(Worklog, self).delete(params)
 
@@ -732,11 +719,11 @@ class Role(Resource):
         :type groups: string, list or tuple
         """
         if users is not None and isinstance(users, string_types):
-            users = (users,)
+            users=(users,)
         if groups is not None and isinstance(groups, string_types):
-            groups = (groups,)
+            groups=(groups,)
 
-        data = {
+        data={
             'id': self.id,
             'categorisedActors': {
                 'atlassian-user-role-actor': users,
