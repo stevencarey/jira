@@ -521,7 +521,6 @@ class Issue(Resource):
 
         try:
             for change in changelog:
-                print(change.field, change.from_squad, change.to_squad)
                 seen = all([
                     change.field == 'Squad',
                     change.from_squad == squad or change.to_squad == squad])
