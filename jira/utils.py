@@ -220,19 +220,17 @@ def get_error_list(r):
 
 
 def make_naive_datetime(date_string):
-    
     try:
         # convert datetime to string.
-        dt = datetime.strftime(date_string, "%Y-%m-%dT%H:%M") # return string
+        dt = datetime.strftime(date_string, "%Y-%m-%dT%H:%M")
 
         # stip everything after seconds. ie all +HH:MM for timezone.
         dt = re.sub(r':\d{2}\..*$', '', dt)
 
-    except TypeError as e:
-        print('TypeError: {}'.format(e))
+    except TypeError:
         dt = re.sub(r':\d{2}\..*$', '', date_string)
 
-    return datetime.strptime(dt, "%Y-%m-%dT%H:%M") # return object
+    return datetime.strptime(dt, "%Y-%m-%dT%H:%M")
 
 
 def get_utc(date_string, timezone):
@@ -242,6 +240,6 @@ def get_utc(date_string, timezone):
     '''
     naive = make_naive_datetime(date_string)
     local = pytz.timezone(timezone)
-    local_dt = local.localize(naive, is_dst=None) # localize takes datetime obj
+    local_dt = local.localize(naive, is_dst=None)
     utc_dt = local_dt.astimezone(pytz.utc)
     return utc_dt
