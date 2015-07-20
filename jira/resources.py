@@ -420,6 +420,7 @@ class Issue(Resource):
         return not any(findings)
 
     def get_issue_changelog(self):
+        histories = []
         if self._get_histories() is not None:
             for history in self._get_histories():
                 timezone = history.author.timeZone
@@ -448,9 +449,10 @@ class Issue(Resource):
                     h['from_status'] = history_item.fromString if history_item.field == 'Status' and history_item.fromString else None
                     h['to_status'] = history_item.toString if history_item.field == 'Status' and history_item.toString else None
                     h['timezone'] = timezone
-                    yield IssueHistory(**h)
+                    histories.append(IssueHistory(**h))
+            return histories
         else:
-            yield None
+            return None
 
     def get_board_entry_time(self, squad):
 
