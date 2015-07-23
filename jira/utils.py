@@ -242,5 +242,4 @@ def get_utc(date_string, timezone='Europe/London'):
     local = pytz.timezone(timezone)
     local_dt = local.localize(naive, is_dst=None)
     utc_dt = local_dt.astimezone(pytz.utc)
-    print('get utc: incoming: {}, outgoing: {}'.format(date_string, utc_dt))
     return utc_dt
