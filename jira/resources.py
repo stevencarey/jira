@@ -480,12 +480,9 @@ class Issue(Resource):
 
 
     def get_board_exit_time(self, squad):
-
-        histories = self.get_issue_changelog()
-        for history in histories:
+        for history in self.get_issue_changelog():
             if all([history.field == 'Squad', history.from_squad == squad, history.to_squad != squad]):
-                exit = history.created #get_utc(history.created)
-                return exit
+                return history.change_created
 
     def get_board_duration(self, squad):
         """ How long has the issue been on the squad's board."""
