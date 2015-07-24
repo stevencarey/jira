@@ -17,7 +17,7 @@ IssueHistory = namedtuple('IssueHistory', [
     'author_email',
     'author_display_name',
     'user_active',
-    'created',
+    'change_created',
     'field',
     'from_project',
     'to_project',
@@ -233,7 +233,7 @@ def make_naive_datetime(date_string):
     return datetime.strptime(dt, "%Y-%m-%dT%H:%M")
 
 
-def get_utc(date_string, timezone):
+def get_utc(date_string, timezone='Europe/London'):
     '''
     :type date_string str
     :rtype datetime

@@ -424,8 +424,8 @@ class Issue(Resource):
         if self._get_histories() is not None:
             for history in self._get_histories():
                 timezone = history.author.timeZone
-                created = get_utc(history.created, timezone)
-                original_issue_created = get_utc(self.fields.created, self.fields.creator.timeZone)
+                created = get_utc(history.created)
+                original_issue_created = get_utc(self.fields.created)
 
                 for history_item in history.items:
                     h = {}
@@ -438,7 +438,7 @@ class Issue(Resource):
                     h['author_display_name'] = history.author.displayName if history.author.displayName else None
                     h['user_active'] = history.author.active if history.author.active else None
                     # time the change was made.
-                    h['created'] = created if created else None
+                    h['change_created'] = created if created else None
                     h['field'] = history_item.field if history_item.field else None
                     h['from_project'] = history_item.fromString if history_item.field == 'project' and history_item.fromString else None
                     h['to_project'] = history_item.toString if history_item.field == 'project' and history_item.toString else None
@@ -460,7 +460,7 @@ class Issue(Resource):
 
         if self.is_native():
             # time created on original board.
-            arrival_time = get_utc(self.fields.created, self.fields.creator.timeZone)
+            arrival_time = get_utc(self.fields.created)
 
         elif not self.is_native() and histories is not None:
 
@@ -473,19 +473,16 @@ class Issue(Resource):
             # where 'from_squad' == squad is 1, we can assume the date of original creation
             # is when the issue arrived in triage.
 
-            arrival_time = [get_utc(history.dt_issue_created, history.creator_timezone) for num, history in enumerate(histories, 1) if all([
+            arrival_time = [get_utc(history.dt_issue_created) for num, history in enumerate(histories, 1) if all([
                 history.field == 'Squad',
                 history.from_squad == squad])][0]
             return arrival_time
 
 
     def get_board_exit_time(self, squad):
-
-        histories = self.get_issue_changelog()
-        for history in histories:
+        for history in self.get_issue_changelog():
             if all([history.field == 'Squad', history.from_squad == squad, history.to_squad != squad]):
-                exit = get_utc(history.created, history.timezone)
-                return exit
+                return history.change_created
 
     def get_board_duration(self, squad):
         """ How long has the issue been on the squad's board."""
@@ -496,10 +493,10 @@ class Issue(Resource):
             delta = exited - entered
 
         else:
-            dt_created, timezone = self.fields.created, self.fields.reporter.timeZone
+            dt_created = self.fields.created
             now = datetime.now()
             now = now.strftime("%Y-%m-%dT%H:%M")
-            delta = get_utc(now, timezone) - get_utc(dt_created, timezone)
+            delta = get_utc(now) - get_utc(dt_created)
 
         return delta
 
