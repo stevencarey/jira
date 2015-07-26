@@ -30,6 +30,17 @@ IssueHistory = namedtuple('IssueHistory', [
     'timezone'
 ])
 
+CHANGELOG_MAP = {
+    'status': 'status',
+    'assignee': 'Assignee',
+    'attachment': 'Attachment',
+    'squad': 'Squad',
+    'epic': 'Epic Link',
+    'link': 'Link',
+    'priority': 'priority',
+    'description': 'description',
+    'rank': 'Rank',
+}
 
 class CaseInsensitiveDict(dict):
 

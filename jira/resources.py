@@ -10,10 +10,10 @@ import re
 import logging
 import json
 from datetime import datetime
-from operator import attrgetter
+from operator import attrgetter, eq, contains
 from six import iteritems, string_types, text_type
 
-from .utils import threaded_requests, json_loads, get_error_list, CaseInsensitiveDict, IssueHistory, get_utc
+from .utils import threaded_requests, json_loads, get_error_list, CaseInsensitiveDict, IssueHistory, get_utc, CHANGELOG_MAP
 
 
 class Resource(object):
@@ -431,23 +431,36 @@ class Issue(Resource):
                     h = {}
                     h['id'] = history.id if history.id else None
                     h['fda'] = self.key
-                    h['dt_issue_created'] = original_issue_created if original_issue_created else None
-                    h['creator_timezone'] = self.fields.creator.timeZone if self.fields.creator.timeZone else None
-                    h['author'] = history.author.displayName if history.author.displayName else None
-                    h['author_email'] = history.author.emailAddress if history.author.emailAddress else None
-                    h['author_display_name'] = history.author.displayName if history.author.displayName else None
+                    h[
+                        'dt_issue_created'] = original_issue_created if original_issue_created else None
+                    h[
+                        'creator_timezone'] = self.fields.creator.timeZone if self.fields.creator.timeZone else None
+                    h[
+                        'author'] = history.author.displayName if history.author.displayName else None
+                    h[
+                        'author_email'] = history.author.emailAddress if history.author.emailAddress else None
+                    h[
+                        'author_display_name'] = history.author.displayName if history.author.displayName else None
                     h['user_active'] = history.author.active if history.author.active else None
                     # time the change was made.
                     h['change_created'] = created if created else None
                     h['field'] = history_item.field if history_item.field else None
-                    h['from_project'] = history_item.fromString if history_item.field == 'project' and history_item.fromString else None
-                    h['to_project'] = history_item.toString if history_item.field == 'project' and history_item.toString else None
-                    h['from_squad'] = history_item.fromString if history_item.field == 'Squad' and history_item.fromString else None
-                    h['to_squad'] = history_item.toString if history_item.field == 'Squad' and history_item.toString else None
-                    h['from_assignee'] = history_item.fromString if history_item.field == 'Assignee' and history_item.fromString else None
-                    h['to_assignee'] = history_item.toString if history_item.field == 'Assignee' and history_item.toString else None
-                    h['from_status'] = history_item.fromString if history_item.field == 'Status' and history_item.fromString else None
-                    h['to_status'] = history_item.toString if history_item.field == 'Status' and history_item.toString else None
+                    h[
+                        'from_project'] = history_item.fromString if history_item.field == 'project' and history_item.fromString else None
+                    h[
+                        'to_project'] = history_item.toString if history_item.field == 'project' and history_item.toString else None
+                    h[
+                        'from_squad'] = history_item.fromString if history_item.field == 'Squad' and history_item.fromString else None
+                    h[
+                        'to_squad'] = history_item.toString if history_item.field == 'Squad' and history_item.toString else None
+                    h[
+                        'from_assignee'] = history_item.fromString if history_item.field == 'Assignee' and history_item.fromString else None
+                    h[
+                        'to_assignee'] = history_item.toString if history_item.field == 'Assignee' and history_item.toString else None
+                    h[
+                        'from_status'] = history_item.fromString if history_item.field == 'Status' and history_item.fromString else None
+                    h[
+                        'to_status'] = history_item.toString if history_item.field == 'Status' and history_item.toString else None
                     h['timezone'] = timezone
                     histories.append(IssueHistory(**h))
             return histories
@@ -478,11 +491,10 @@ class Issue(Resource):
                 history.from_squad == squad])][0]
             return arrival_time
 
-
-    def get_board_exit_time(self, squad):
-        for history in self.get_issue_changelog():
-            if all([history.field == 'Squad', history.from_squad == squad, history.to_squad != squad]):
-                return history.change_created
+    # def get_board_exit_time(self, squad):
+    #     for history in self.get_issue_changelog():
+    #         if all([history.field == 'Squad', history.from_squad == squad, history.to_squad != squad]):
+    #             return history.change_created
 
     def get_board_duration(self, squad):
         """ How long has the issue been on the squad's board."""
@@ -530,6 +542,22 @@ class Issue(Resource):
 
         return any(findings)
 
+    def time_changed(self, **params):
+
+        def make_key_val(change):
+            return [(getattr(change, '{}_{}'.format(arg, CHANGELOG_MAP.get(params['field'])), val)) for arg, val in (params if arg != 'field' else (getattr(change, 'field'), val))]
+
+        
+        changelog = self.get_issue_changelog()
+
+        changes = [change for change in changelog if eq(item[0], item[1]) for item in make_key_val(change)]
+        
+        if params['users']:
+            changes = [change for change in changes if change.author in params['users']]
+
+        
+        return min([change.created for change in changes])
+
 
 class Comment(Resource):
 
@@ -542,11 +570,11 @@ class Comment(Resource):
 
     def update(self, fields=None, async=None, jira=None, body='', visibility=None):
         # TODO: fix the Resource.update() override mess
-        data={}
+        data = {}
         if body:
-            data['body']=body
+            data['body'] = body
         if visibility:
-            data['visibility']=visibility
+            data['visibility'] = visibility
         super(Comment, self).update(data)
 
 
@@ -571,15 +599,15 @@ class RemoteLink(Resource):
         :param application: application information for the link (see the above link for details)
         :param relationship: relationship description for the link (see the above link for details)
         """
-        data={
+        data = {
             'object': object
         }
         if globalId is not None:
-            data['globalId']=globalId
+            data['globalId'] = globalId
         if application is not None:
-            data['application']=application
+            data['application'] = application
         if relationship is not None:
-            data['relationship']=relationship
+            data['relationship'] = relationship
 
         super(RemoteLink, self).update(**data)
 
@@ -614,7 +642,7 @@ class TimeTracking(Resource):
 
     def __init__(self, options, session, raw=None):
         Resource.__init__(self, 'issue/{0}/worklog/{1}', options, session)
-        self.remainingEstimate=None
+        self.remainingEstimate = None
         if raw:
             self._parse_raw(raw)
 
@@ -637,13 +665,13 @@ class Worklog(Resource):
         :param newEstimate: combined with ``adjustEstimate=new``, set the estimate to this value
         :param increaseBy: combined with ``adjustEstimate=manual``, increase the remaining estimate by this amount
         """
-        params={}
+        params = {}
         if adjustEstimate is not None:
-            params['adjustEstimate']=adjustEstimate
+            params['adjustEstimate'] = adjustEstimate
         if newEstimate is not None:
-            params['newEstimate']=newEstimate
+            params['newEstimate'] = newEstimate
         if increaseBy is not None:
-            params['increaseBy']=increaseBy
+            params['increaseBy'] = increaseBy
 
         super(Worklog, self).delete(params)
 
@@ -717,11 +745,11 @@ class Role(Resource):
         :type groups: string, list or tuple
         """
         if users is not None and isinstance(users, string_types):
-            users=(users,)
+            users = (users,)
         if groups is not None and isinstance(groups, string_types):
-            groups=(groups,)
+            groups = (groups,)
 
-        data={
+        data = {
             'id': self.id,
             'categorisedActors': {
                 'atlassian-user-role-actor': users,
