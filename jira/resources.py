@@ -431,36 +431,25 @@ class Issue(Resource):
                     h = {}
                     h['id'] = history.id if history.id else None
                     h['fda'] = self.key
-                    h[
-                        'dt_issue_created'] = original_issue_created if original_issue_created else None
-                    h[
-                        'creator_timezone'] = self.fields.creator.timeZone if self.fields.creator.timeZone else None
-                    h[
-                        'author'] = history.author.displayName if history.author.displayName else None
-                    h[
-                        'author_email'] = history.author.emailAddress if history.author.emailAddress else None
-                    h[
-                        'author_display_name'] = history.author.displayName if history.author.displayName else None
+                    h['dt_issue_created'] = original_issue_created if original_issue_created else None
+                    h['creator_timezone'] = self.fields.creator.timeZone if self.fields.creator.timeZone else None
+                    h['author'] = history.author.displayName if history.author.displayName else None
+                    h['author_email'] = history.author.emailAddress if history.author.emailAddress else None
+                    h['author_display_name'] = history.author.displayName if history.author.displayName else None
                     h['user_active'] = history.author.active if history.author.active else None
                     # time the change was made.
                     h['change_created'] = created if created else None
                     h['field'] = history_item.field if history_item.field else None
-                    h[
-                        'from_project'] = history_item.fromString if history_item.field == 'project' and history_item.fromString else None
-                    h[
-                        'to_project'] = history_item.toString if history_item.field == 'project' and history_item.toString else None
-                    h[
-                        'from_squad'] = history_item.fromString if history_item.field == 'Squad' and history_item.fromString else None
-                    h[
-                        'to_squad'] = history_item.toString if history_item.field == 'Squad' and history_item.toString else None
-                    h[
-                        'from_assignee'] = history_item.fromString if history_item.field == 'Assignee' and history_item.fromString else None
-                    h[
-                        'to_assignee'] = history_item.toString if history_item.field == 'Assignee' and history_item.toString else None
-                    h[
-                        'from_status'] = history_item.fromString if history_item.field == 'Status' and history_item.fromString else None
-                    h[
-                        'to_status'] = history_item.toString if history_item.field == 'Status' and history_item.toString else None
+                    h['from_project'] = history_item.fromString if history_item.field == 'project' and history_item.fromString else None
+                    h['to_project'] = history_item.toString if history_item.field == 'project' and history_item.toString else None
+                    h['from_squad'] = history_item.fromString if history_item.field == 'Squad' and history_item.fromString else None
+                    h['to_squad'] = history_item.toString if history_item.field == 'Squad' and history_item.toString else None
+                    h['from_assignee'] = history_item.fromString if history_item.field == 'Assignee' and history_item.fromString else None
+                    h['to_assignee'] = history_item.toString if history_item.field == 'Assignee' and history_item.toString else None
+                    h['from_status'] = history_item.fromString if history_item.field == 'Status' and history_item.fromString else None
+                    h['to_status'] = history_item.toString if history_item.field == 'Status' and history_item.toString else None
+                    h['from_epic'] = history_item.fromString if history_item.field == 'Epic Link' and history_item.fromString else None
+                    h['to_epic'] = history_item.toString if history_item.field == 'Epic Link' and history_item.toString else None
                     h['timezone'] = timezone
                     histories.append(IssueHistory(**h))
             return histories
@@ -545,16 +534,59 @@ class Issue(Resource):
     def time_changed(self, **params):
 
         def make_key_val(change):
-            return [(getattr(change, '{}_{}'.format(arg, CHANGELOG_MAP.get(params['field'])), val)) for arg, val in (params if arg != 'field' else (getattr(change, 'field'), val))]
+            print('issue: {}'.format(change.fda))
+            # return [(getattr(change, '{}_{}'.format(arg, CHANGELOG_MAP.get(params['field'])), val)) for arg, val in (params if arg != 'field' else (getattr(change, 'field'), val))]
+            param_args = []
+            for arg, val in params.items():
+                # print('arg: {}, val: {}'.format(arg, val))
+                if arg != 'field' and arg != 'users':
+                    
+                    mapped = params['field'][0].lower()
+                    # print('params[field]: {}'.format(mapped))
+                    at = '{}_{}'.format(arg, mapped)
+                    print('at: {}'.format(at))
+                    attribute = (getattr(change, at), val)
+                    print('attribute: {}'.format(attribute))
+                    param_args.append(attribute)
+                else:
+                    param_args.append((getattr(change, 'field'), val))
+            return param_args
 
-        
+        # changes = []
+        # for change in self.get_issue_changelog():
+        #     param_args = make_key_val(change)
+
+        #     # is is_native
+        #     # if the issue is native and from_squad or to_squad == current_squad(),
+        #     # just return the time created
+        #     for k, v in param_args.items():
+
+        #         if self.is_native():
+        #             if k == 'to_squad' and v == self.current_squad():
+        #                 changes.append(change.created)
+
+        # if squad, epic, assignee, status, priority, description etc
         changelog = self.get_issue_changelog()
 
-        changes = [change for change in changelog if eq(item[0], item[1]) for item in make_key_val(change)]
+        # changes = [change for change in changelog if eq(getattr(change, item[0]), item[1]) for item in make_key_val(change)]
         
+        # changes = [change for change in changelog for item in make_key_val(change) if eq(getattr(change, item[0]), item[1])]
+        chan = [] 
+        for change in changelog:
+            # print('change {}'.format(make_key_val(change)))
+            for item in make_key_val(change):
+                print('item[0]: {}, item[1]: {}'.format(item[0], item[1]))
+                if eq(getattr(change, item[0]), item[1][0]):
+                    chan.append(change)
         if params['users']:
             changes = [change for change in changes if change.author in params['users']]
 
+
+
+        # if the issue is_native and no changelog
+
+        # elif the issue is native and there is a changelog
+        # there won't be any squad changes.
         
         return min([change.created for change in changes])
 

@@ -27,19 +27,21 @@ IssueHistory = namedtuple('IssueHistory', [
     'to_assignee',
     'from_status',
     'to_status',
+    'from_epic',
+    'to_epic',
     'timezone'
 ])
 
 CHANGELOG_MAP = {
     'status': 'status',
-    'assignee': 'Assignee',
-    'attachment': 'Attachment',
-    'squad': 'Squad',
-    'epic': 'Epic Link',
-    'link': 'Link',
-    'priority': 'priority',
-    'description': 'description',
-    'rank': 'Rank',
+    'assignee': 'assignee',
+    'Squad': 'squad',
+    'Epic Link': 'epic',
+    # 'link': 'Link',
+    # 'priority': 'priority',
+    # 'attachment': 'Attachment',
+    # 'description': 'description',
+    # 'rank': 'Rank',
 }
 
 class CaseInsensitiveDict(dict):
