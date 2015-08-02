@@ -398,6 +398,14 @@ class Issue(Resource):
     def current_squad(self):
         return self.fields.customfield_11100.value
 
+    def has_component(self, *components):
+        issue_components = {component.name for component in self.fields.components}
+        # issue_components = set(issue_components)
+        components = {component for component in components}
+        # components = set(components)
+        return True if components.intersection(issue_components) else False
+
+
     def is_native(self):
         """
         Check if the issue was created on the current board or if
@@ -446,8 +454,8 @@ class Issue(Resource):
                     h['to_squad'] = history_item.toString if history_item.field == 'Squad' and history_item.toString else None
                     h['from_assignee'] = history_item.fromString if history_item.field == 'Assignee' and history_item.fromString else None
                     h['to_assignee'] = history_item.toString if history_item.field == 'Assignee' and history_item.toString else None
-                    h['from_status'] = history_item.fromString if history_item.field == 'Status' and history_item.fromString else None
-                    h['to_status'] = history_item.toString if history_item.field == 'Status' and history_item.toString else None
+                    h['from_status'] = history_item.fromString if history_item.field == 'status' and history_item.fromString else None
+                    h['to_status'] = history_item.toString if history_item.field == 'status' and history_item.toString else None
                     h['timezone'] = timezone
                     histories.append(IssueHistory(**h))
             return histories
