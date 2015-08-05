@@ -427,6 +427,9 @@ class Issue(Resource):
 
         return not any(findings)
 
+    def is_resolved(self):
+        return self.fields.status.name == 'Done'
+
     def get_issue_changelog(self):
         histories = []
         if self._get_histories() is not None:
@@ -452,8 +455,8 @@ class Issue(Resource):
                     h['to_project'] = history_item.toString if history_item.field == 'project' and history_item.toString else None
                     h['from_squad'] = history_item.fromString if history_item.field == 'Squad' and history_item.fromString else None
                     h['to_squad'] = history_item.toString if history_item.field == 'Squad' and history_item.toString else None
-                    h['from_assignee'] = history_item.fromString if history_item.field == 'Assignee' and history_item.fromString else None
-                    h['to_assignee'] = history_item.toString if history_item.field == 'Assignee' and history_item.toString else None
+                    h['from_assignee'] = history_item.fromString if history_item.field == 'assignee' and history_item.fromString else None
+                    h['to_assignee'] = history_item.toString if history_item.field == 'assignee' and history_item.toString else None
                     h['from_status'] = history_item.fromString if history_item.field == 'status' and history_item.fromString else None
                     h['to_status'] = history_item.toString if history_item.field == 'status' and history_item.toString else None
                     h['timezone'] = timezone
@@ -466,12 +469,12 @@ class Issue(Resource):
 
         histories = self.get_issue_changelog()
 
+        arrival_time = None
+
         if self.is_native():
-            # time created on original board.
-            arrival_time = get_utc(self.fields.created)
+            return get_utc(self.fields.created)
 
-        elif not self.is_native() and histories is not None:
-
+        if histories is not None:
             # time issue was moved to 'squad'.
             # No way of determining the time an issue arrived in triage.
             # We can see issues moving from triage and the time it happened,
@@ -481,13 +484,26 @@ class Issue(Resource):
             # where 'from_squad' == squad is 1, we can assume the date of original creation
             # is when the issue arrived in triage.
 
-            arrival_time = [get_utc(history.dt_issue_created) for num, history in enumerate(histories, 1) if all([
+            arrival_times = [history.change_created for num, history in enumerate(histories, 1) if all([
                 history.field == 'Squad',
-                history.from_squad == squad])][0]
-            return arrival_time
+                history.to_squad == squad])]
+
+            if arrival_times:
+                arrival_time = arrival_times[0]
+
+        if not arrival_time:
+            arrival_time = get_utc(self.fields.created)
+
+        return arrival_time
 
 
     def get_board_exit_time(self, squad):
+
+        if self.is_resolved():
+            for history in self.get_issue_changelog():
+                if history.to_status == 'Done':
+                    return history.change_created
+
         for history in self.get_issue_changelog():
             if all([history.field == 'Squad', history.from_squad == squad, history.to_squad != squad]):
                 return history.change_created
@@ -522,19 +538,20 @@ class Issue(Resource):
         Has the issue been on `squad` board?
 
         """
+
+        if self.current_squad() == squad:
+           return True
+
         findings = []
         # check the changelog for squad moves.
         changelog = self.get_issue_changelog()
 
-        try:
-            for change in changelog:
-                seen = all([
-                    change.field == 'Squad',
-                    change.from_squad == squad or change.to_squad == squad])
+        for change in changelog:
+            seen = all([
+                change.field == 'Squad',
+                change.from_squad == squad or change.to_squad == squad])
 
-                findings.append(True if seen else False)
-        except:
-            findings = [True if squad == self.current_squad() else False]
+            findings.append(True if seen else False)
 
         return any(findings)
 
