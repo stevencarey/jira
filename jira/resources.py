@@ -326,6 +326,7 @@ class Issue(Resource):
 
     def __init__(self, options, session, raw=None):
         Resource.__init__(self, 'issue/{0}', options, session)
+        self._labels = None
         if raw:
             self._parse_raw(raw)
 
@@ -399,12 +400,18 @@ class Issue(Resource):
         return self.fields.customfield_11100.value
 
     def has_component(self, *components):
-        issue_components = {
-            component.name for component in self.fields.components}
-        # issue_components = set(issue_components)
+        issue_components = {component.name for component in self.fields.components}
         components = {component for component in components}
-        # components = set(components)
         return True if components.intersection(issue_components) else False
+
+    @property
+    def labels(self):
+        return self.fields.labels
+
+    def has_label(self, values):
+        if not isinstance(values, (list, tuple)):
+            raise TypeError('Labels must be a list or tuple.')
+        return self.labels in values
 
     def is_native(self):
         """
