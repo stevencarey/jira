@@ -399,12 +399,12 @@ class Issue(Resource):
         return self.fields.customfield_11100.value
 
     def has_component(self, *components):
-        issue_components = {component.name for component in self.fields.components}
+        issue_components = {
+            component.name for component in self.fields.components}
         # issue_components = set(issue_components)
         components = {component for component in components}
         # components = set(components)
         return True if components.intersection(issue_components) else False
-
 
     def is_native(self):
         """
@@ -496,7 +496,6 @@ class Issue(Resource):
 
         return arrival_time
 
-
     def get_board_exit_time(self, squad):
 
         if self.is_resolved():
@@ -505,7 +504,9 @@ class Issue(Resource):
                     return history.change_created
 
         for history in self.get_issue_changelog():
-            if all([history.field == 'Squad', history.from_squad == squad, history.to_squad != squad]):
+            if all([history.field == 'Squad',
+                    history.from_squad == squad,
+                    history.to_squad != squad]):
                 return history.change_created
 
     def get_board_duration(self, squad):
@@ -540,7 +541,7 @@ class Issue(Resource):
         """
 
         if self.current_squad() == squad:
-           return True
+            return True
 
         findings = []
         # check the changelog for squad moves.
@@ -555,6 +556,13 @@ class Issue(Resource):
 
         return any(findings)
 
+    def get_status(self):
+        changelog = self.get_issue_changelog()
+        filtered = (i for i in changelog if all([i.from_status is not None,
+                                                 i.to_status is not None]))
+        last = max(filtered, key=lambda x: x.change_created)
+        return last.to_status.lower()
+
 
 class Comment(Resource):
 
@@ -567,11 +575,11 @@ class Comment(Resource):
 
     def update(self, fields=None, async=None, jira=None, body='', visibility=None):
         # TODO: fix the Resource.update() override mess
-        data={}
+        data = {}
         if body:
-            data['body']=body
+            data['body'] = body
         if visibility:
-            data['visibility']=visibility
+            data['visibility'] = visibility
         super(Comment, self).update(data)
 
 
@@ -596,15 +604,15 @@ class RemoteLink(Resource):
         :param application: application information for the link (see the above link for details)
         :param relationship: relationship description for the link (see the above link for details)
         """
-        data={
+        data = {
             'object': object
         }
         if globalId is not None:
-            data['globalId']=globalId
+            data['globalId'] = globalId
         if application is not None:
-            data['application']=application
+            data['application'] = application
         if relationship is not None:
-            data['relationship']=relationship
+            data['relationship'] = relationship
 
         super(RemoteLink, self).update(**data)
 
@@ -639,7 +647,7 @@ class TimeTracking(Resource):
 
     def __init__(self, options, session, raw=None):
         Resource.__init__(self, 'issue/{0}/worklog/{1}', options, session)
-        self.remainingEstimate=None
+        self.remainingEstimate = None
         if raw:
             self._parse_raw(raw)
 
@@ -662,13 +670,13 @@ class Worklog(Resource):
         :param newEstimate: combined with ``adjustEstimate=new``, set the estimate to this value
         :param increaseBy: combined with ``adjustEstimate=manual``, increase the remaining estimate by this amount
         """
-        params={}
+        params = {}
         if adjustEstimate is not None:
-            params['adjustEstimate']=adjustEstimate
+            params['adjustEstimate'] = adjustEstimate
         if newEstimate is not None:
-            params['newEstimate']=newEstimate
+            params['newEstimate'] = newEstimate
         if increaseBy is not None:
-            params['increaseBy']=increaseBy
+            params['increaseBy'] = increaseBy
 
         super(Worklog, self).delete(params)
 
@@ -742,11 +750,11 @@ class Role(Resource):
         :type groups: string, list or tuple
         """
         if users is not None and isinstance(users, string_types):
-            users=(users,)
+            users = (users,)
         if groups is not None and isinstance(groups, string_types):
-            groups=(groups,)
+            groups = (groups,)
 
-        data={
+        data = {
             'id': self.id,
             'categorisedActors': {
                 'atlassian-user-role-actor': users,
