@@ -408,10 +408,12 @@ class Issue(Resource):
     def labels(self):
         return self.fields.labels
 
-    def has_label(self, values):
+    def has_label(self, *values):
         if not isinstance(values, (list, tuple)):
             raise TypeError('Labels must be a list or tuple.')
-        return self.labels in values
+        issue_labels = {l for l in self.labels}
+        values = {v for v in values}
+        return True if values.intersection(issue_labels) else False
 
     def is_native(self):
         """
