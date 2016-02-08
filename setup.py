@@ -3,6 +3,7 @@ import logging
 import os
 import re
 import sys
+import subprocess
 import warnings
 import codecs
 
@@ -22,6 +23,16 @@ fp.close()
 warnings.simplefilter('ignore', UserWarning)
 
 
+def _is_ordereddict_needed():
+    """ Check if `ordereddict` package really needed """
+    try:
+        from collections import OrderedDict
+        return False
+    except ImportError:
+        pass
+    return True
+
+
 class PyTest(TestCommand):
     user_options = [('pytest-args=', 'a', "Arguments to pass to py.test")]
 
@@ -29,9 +40,8 @@ class PyTest(TestCommand):
         TestCommand.initialize_options(self)
         self.pytest_args = []
 
-        FORMAT = '%(levelname)-10s %(message)s'
-        logging.basicConfig(format=FORMAT)
-        logging.getLogger().setLevel(logging.INFO)
+        logging.basicConfig(format='%(levelname)-10s %(message)s')
+        logging.getLogger("jira").setLevel(logging.INFO)
 
         # if we have pytest-cache module we enable the test failures first mode
         try:
@@ -39,18 +49,11 @@ class PyTest(TestCommand):
             self.pytest_args.append("--ff")
         except ImportError:
             pass
-
-        # try:
-        #     import pytest_instafail
-        #     self.pytest_args.append("--instafail")
-        # except ImportError:
-        #     pass
         self.pytest_args.append("-s")
 
         if sys.stdout.isatty():
             # when run manually we enable fail fast
             self.pytest_args.append("--maxfail=1")
-
         try:
             import coveralls
             self.pytest_args.append("--cov=%s" % NAME)
@@ -67,11 +70,13 @@ class PyTest(TestCommand):
 
     def run_tests(self):
         # before running tests we need to run autopep8
-        r = os.system(
-            "python -m autopep8 -r --in-place jira/ tests/ examples/")
-        if r:
-            raise Exception("autopep8 failed")
-
+        try:
+            r = subprocess.check_call(
+                "python -m autopep8 -r --in-place jira/ tests/ examples/",
+                shell=True)
+        except subprocess.CalledProcessError:
+            logging.warning('autopep8 is not installed so '
+                        'it will not be run')
         # import here, cause outside the eggs aren't loaded
         import pytest
         errno = pytest.main(self.pytest_args)
@@ -140,16 +145,16 @@ setup(
     packages=find_packages(exclude=['tests', 'tools']),
     include_package_data=True,
 
-
     install_requires=['requests>=2.6.0',
                       'requests_oauthlib>=0.3.3',
                       'tlslite>=0.4.4',
                       'six>=1.9.0',
-                      'requests_toolbelt',
-                      'ordereddict'],
-    setup_requires=[],
+                      'requests_toolbelt'] + (['ordereddict'] if _is_ordereddict_needed() else []),
     tests_require=['pytest', 'tlslite>=0.4.4', 'requests>=2.6.0',
-                   'setuptools', 'pep8', 'autopep8', 'sphinx', 'six>=1.9.0'],
+                   'setuptools', 'pep8', 'autopep8', 'sphinx', 'sphinx_rtd_theme', 'six>=1.9.0',
+                   'pytest-cov', 'pytest-pep8', 'pytest-instafail',
+                   'pytest-xdist',
+                   ],
     extras_require={
         'magic': ['filemagic>=1.6'],
         'shell': ['ipython>=0.13'],
@@ -162,6 +167,8 @@ setup(
     license='BSD',
     description='Python library for interacting with JIRA via REST APIs.',
     long_description=open("README.rst").read(),
+    maintainer='Sorin Sbarnea',
+    maintainer_email='sorin.sbarnea@gmail.com',
     author='Ben Speakmon',
     author_email='ben.speakmon@gmail.com',
     provides=[NAME],
@@ -171,21 +178,19 @@ setup(
     keywords='jira atlassian rest api',
 
     classifiers=[
-        'Programming Language :: Python',
-        'Programming Language :: Python :: 2.5',
-        'Programming Language :: Python :: 2.6',
-        'Programming Language :: Python :: 2.7',
-        'Programming Language :: Python :: 3',
-        'Development Status :: 4 - Beta',
+        'Development Status :: 5 - Production/Stable',
         'Environment :: Other Environment',
         'Intended Audience :: Developers',
         'License :: OSI Approved :: BSD License',
         'Operating System :: OS Independent',
-        'Topic :: Software Development :: Libraries :: Python Modules',
         'Programming Language :: Python :: 2.6',
         'Programming Language :: Python :: 2.7',
+        'Programming Language :: Python :: 3',
         'Programming Language :: Python :: 3.3',
         'Programming Language :: Python :: 3.4',
+        'Programming Language :: Python :: 3.5',
+        'Programming Language :: Python',
         'Topic :: Internet :: WWW/HTTP',
+        'Topic :: Software Development :: Libraries :: Python Modules',
     ],
 )

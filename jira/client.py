@@ -15,19 +15,36 @@ from functools import wraps
 import imghdr
 import mimetypes
 
+import collections
 import copy
 import os
 import re
-import string
 import tempfile
 import logging
+try:  # Python 2.7+
+    from logging import NullHandler
+except ImportError:
+    class NullHandler(logging.Handler):
+
+        def emit(self, record):
+            pass
 import json
 import warnings
-import pprint
 import sys
+import datetime
+import calendar
+import hashlib
+from numbers import Number
+
+# noinspection PyUnresolvedReferences
+from six.moves.urllib.parse import urlparse, urlencode
+from six import iteritems
+from requests.utils import get_netrc_auth
+
 try:
     from collections import OrderedDict
 except ImportError:
+    # noinspection PyUnresolvedReferences
     from ordereddict import OrderedDict
 
 from six import string_types, integer_types
@@ -39,20 +56,26 @@ else:
     import html.parser as html_parser
 import requests
 try:
+    # noinspection PyUnresolvedReferences
     from requests_toolbelt import MultipartEncoder
 except:
     pass
 
+try:
+    from requests_jwt import JWTAuth
+except ImportError:
+    pass
+
 # JIRA specific resources
-from jira.resources import Resource, Issue, Comment, Project, Attachment, Component, Dashboard, Filter, Votes, Watchers, \
+from .resources import Resource, Issue, Comment, Project, Attachment, Component, Dashboard, Filter, Votes, Watchers, \
     Worklog, IssueLink, IssueLinkType, IssueType, Priority, Version, Role, Resolution, SecurityLevel, Status, User, \
     CustomFieldOption, RemoteLink
 # GreenHopper specific resources
-from jira.resources import GreenHopperResource, Board, Sprint
-from jira.resilientsession import ResilientSession
-from jira import __version__
-from jira.utils import threaded_requests, json_loads, JIRAError, CaseInsensitiveDict
-
+from .resources import GreenHopperResource, Board, Sprint
+from .resilientsession import ResilientSession, raise_on_error
+from .version import __version__
+from .utils import threaded_requests, json_loads, CaseInsensitiveDict
+from .exceptions import JIRAError
 try:
     from random import SystemRandom
 
@@ -64,7 +87,9 @@ except ImportError:
 
 # encoding = sys.getdefaultencoding()
 # if encoding != 'UTF8':
-#    warnings.warn("Python default encoding is '%s' instead of 'UTF8' which means that there is a big change of having problems. Possible workaround http://stackoverflow.com/a/17628350/99834" % encoding)
+#    warnings.warning("Python default encoding is '%s' instead of 'UTF8' which means that there is a big change of having problems. Possible workaround http://stackoverflow.com/a/17628350/99834" % encoding)
+
+logging.getLogger('jira').addHandler(NullHandler())
 
 
 def translate_resource_args(func):
@@ -86,18 +111,47 @@ def translate_resource_args(func):
     return wrapper
 
 
+def _get_template_list(data):
+    template_list = []
+    if 'projectTemplates' in data:
+        template_list = data['projectTemplates']
+    elif 'projectTemplatesGroupedByType' in data:
+        for group in data['projectTemplatesGroupedByType']:
+            template_list.extend(group['projectTemplates'])
+    return template_list
+
+
 class ResultList(list):
 
-    def __init__(self, iterable=None, _total=None):
+    def __init__(self, iterable=None, _startAt=None, _maxResults=None, _total=None, _isLast=None):
         if iterable is not None:
             list.__init__(self, iterable)
         else:
             list.__init__(self)
-        self.total = _total if _total is not None else len(self)
+
+        self.startAt = _startAt
+        self.maxResults = _maxResults
+        # Optional parameters:
+        self.isLast = _isLast
+        self.total = _total
+
+
+class QshGenerator:
+
+    def __init__(self, context_path):
+        self.context_path = context_path
+
+    def __call__(self, req):
+        parse_result = urlparse(req.url)
+
+        path = parse_result.path[len(self.context_path):] if len(self.context_path) > 1 else parse_result.path
+        query = '&'.join(sorted(parse_result.query.split("&")))
+        qsh = '%(method)s&%(path)s&%(query)s' % {'method': req.method.upper(), 'path': path, 'query': query}
+
+        return hashlib.sha256(qsh).hexdigest()
 
 
 class JIRA(object):
-
     """
     User interface to JIRA.
 
@@ -111,8 +165,11 @@ class JIRA(object):
 
     DEFAULT_OPTIONS = {
         "server": "http://localhost:2990/jira",
+        "context_path": "/",
         "rest_path": "api",
         "rest_api_version": "2",
+        "agile_rest_path": GreenHopperResource.GREENHOPPER_REST_PATH,
+        "agile_rest_api_version": "1.0",
         "verify": True,
         "resilient": True,
         "async": False,
@@ -125,18 +182,19 @@ class JIRA(object):
             'Content-Type': 'application/json',  # ;charset=UTF-8',
             # 'Accept': 'application/json',  # default for REST
 
-            #'Pragma': 'no-cache',
-            #'Expires': 'Thu, 01 Jan 1970 00:00:00 GMT'
+            # 'Pragma': 'no-cache',
+            # 'Expires': 'Thu, 01 Jan 1970 00:00:00 GMT'
         }
     }
 
     checked_version = False
 
-    JIRA_BASE_URL = '{server}/rest/api/{rest_api_version}/{path}'
-    AGILE_BASE_URL = '{server}/rest/greenhopper/1.0/{path}'
+    # TODO: remove these two variables and use the ones defined in resources
+    JIRA_BASE_URL = Resource.JIRA_BASE_URL
+    AGILE_BASE_URL = GreenHopperResource.AGILE_BASE_URL
 
-    def __init__(self, server=None, options=None, basic_auth=None, oauth=None, validate=None, async=False,
-                 logging=True, max_retries=3):
+    def __init__(self, server=None, options=None, basic_auth=None, oauth=None, jwt=None,
+                 validate=False, get_server_info=True, async=False, logging=True, max_retries=3):
         """
         Construct a JIRA client instance.
 
@@ -157,8 +215,11 @@ class JIRA(object):
             * server -- the server address and context path to use. Defaults to ``http://localhost:2990/jira``.
             * rest_path -- the root REST path to use. Defaults to ``api``, where the JIRA REST resources live.
             * rest_api_version -- the version of the REST resources under rest_path to use. Defaults to ``2``.
+            * agile_rest_path - the REST path to use for JIRA Agile requests. Defaults to ``greenhopper`` (old, private
+               API). Check `GreenHopperResource` for other supported values.
             * verify -- Verify SSL certs. Defaults to ``True``.
             * client_cert -- a tuple of (cert,key) for the requests library for client side SSL
+            * check_update -- Check whether using the newest python-jira library version.
         :param basic_auth: A tuple of username and password to use when establishing a session via HTTP BASIC
         authentication.
         :param oauth: A dict of properties for OAuth authentication. The following properties are required:
@@ -167,8 +228,16 @@ class JIRA(object):
             * consumer_key -- key of the OAuth application link defined in JIRA
             * key_cert -- private key file to sign requests with (should be the pair of the public key supplied to
             JIRA in the OAuth application link)
+        :param jwt: A dict of properties for JWT authentication supported by Atlassian Connect. The following
+            properties are required:
+            * secret -- shared secret as delivered during 'installed' lifecycle event
+            (see https://developer.atlassian.com/static/connect/docs/latest/modules/lifecycle.html for details)
+            * payload -- dict of fields to be inserted in the JWT payload, e.g. 'iss'
+            Example jwt structure: ``{'secret': SHARED_SECRET, 'payload': {'iss': PLUGIN_KEY}}``
         :param validate: If true it will validate your credentials first. Remember that if you are accesing JIRA
             as anononymous it will fail to instanciate.
+        :param get_server_info: If true it will fetch server version info first to determine if some API calls
+            are available.
         :param async: To enable async requests for those actions where we implemented it, like issue update() or delete().
         Obviously this means that you cannot rely on the return code when this is enabled.
         """
@@ -192,9 +261,15 @@ class JIRA(object):
 
         self._options.update(options)
 
+        self._rank = None
+
         # Rip off trailing slash since all urls depend on that
         if self._options['server'].endswith('/'):
             self._options['server'] = self._options['server'][:-1]
+
+        context_path = urlparse(self._options['server']).path
+        if len(context_path) > 0:
+            self._options['context_path'] = context_path
 
         self._try_magic()
 
@@ -203,6 +278,8 @@ class JIRA(object):
         elif basic_auth:
             self._create_http_basic_session(*basic_auth)
             self._session.headers.update(self._options['headers'])
+        elif jwt:
+            self._create_jwt_session(jwt)
         else:
             verify = self._options['verify']
             self._session = ResilientSession()
@@ -215,17 +292,28 @@ class JIRA(object):
             # This will raise an Exception if you are not allowed to login.
             # It's better to fail faster than later.
             self.session()
-        # We need version in order to know what API calls are available or not
-        si = self.server_info()
-        try:
-            self._version = tuple(si['versionNumbers'])
-        except Exception as e:
-            globals()['logging'].error("invalid server_info: %s", si)
-            raise e
+
+        if get_server_info:
+            # We need version in order to know what API calls are available or not
+            si = self.server_info()
+            try:
+                self._version = tuple(si['versionNumbers'])
+            except Exception as e:
+                logging.error("invalid server_info: %s", si)
+                raise e
+        else:
+            self._version = (0, 0, 0)
 
         if self._options['check_update'] and not JIRA.checked_version:
             self._check_update_()
             JIRA.checked_version = True
+
+        # TODO: check if this works with non-admin accounts
+        self._fields = {}
+        for f in self.fields():
+            if 'clauseNames' in f:
+                for name in f['clauseNames']:
+                    self._fields[name] = f['id']
 
     def _check_update_(self):
         # check if the current version of the library is outdated
@@ -234,8 +322,9 @@ class JIRA(object):
 
             released_version = data['info']['version']
             if released_version > __version__:
-                warnings.warn("You are running an outdated version of JIRA Python %s. Current version is %s. Do not file any bugs against older versions." % (
-                    __version__, released_version))
+                warnings.warn(
+                    "You are running an outdated version of JIRA Python %s. Current version is %s. Do not file any bugs against older versions." % (
+                        __version__, released_version))
         except requests.RequestException:
             pass
         except Exception as e:
@@ -256,6 +345,65 @@ class JIRA(object):
             raise JIRAError("SecurityTokenMissing: %s" % content)
             return False
         return True
+
+    def _fetch_pages(self, item_type, items_key, request_path, startAt=0, maxResults=50, params=None, base=JIRA_BASE_URL):
+        """
+        Fetches
+        :param item_type: Type of single item. ResultList of such items will be returned.
+        :param items_key: Path to the items in JSON returned from server.
+                Set it to None, if response is an array, and not a JSON object.
+        :param request_path: path in request URL
+        :param startAt: index of the first record to be fetched
+        :param maxResults: Maximum number of items to return.
+                If maxResults evaluates as False, it will try to get all items in batches.
+        :param params: Params to be used in all requests. Should not contain startAt and maxResults,
+                        as they will be added for each request created from this function.
+        :param base: base URL
+        :return: ResultList
+        """
+
+        page_params = params.copy() if params else {}
+        if startAt:
+            page_params['startAt'] = startAt
+        if maxResults:
+            page_params['maxResults'] = maxResults
+        resource = self._get_json(request_path, params=page_params, base=base)
+        next_items_page = [item_type(self._options, self._session, raw_issue_json) for raw_issue_json in
+                           (resource[items_key] if items_key else resource)]
+        items = next_items_page
+
+        if True:  # isinstance(resource, dict):
+
+            if isinstance(resource, dict):
+                total = resource.get('total', 1)
+                # 'isLast' is the optional key added to responses in JIRA Agile 6.7.6. So far not used in basic JIRA API.
+                is_last = resource.get('isLast', True)
+                start_at_from_response = resource.get('startAt', 0)
+                max_results_from_response = resource.get('maxResults', 1)
+            else:
+                # if is a list
+                total = 1
+                is_last = True
+                start_at_from_response = 0
+                max_results_from_response = 1
+
+            # If maxResults evaluates as False, get all items in batches
+            if not maxResults:
+                page_size = max_results_from_response or len(items)
+                page_start = (startAt or start_at_from_response or 0) + page_size
+                while not is_last and (total is None or page_start < total) and len(next_items_page) == page_size:
+                    page_params['startAt'] = page_start
+                    page_params['maxResults'] = page_size
+                    resource = self._get_json(request_path, params=page_params, base=base)
+                    next_items_page = [item_type(self._options, self._session, raw_issue_json) for raw_issue_json in
+                                       (resource[items_key] if items_key else resource)]
+                    items.extend(next_items_page)
+                    page_start += page_size
+
+            return ResultList(items, start_at_from_response, max_results_from_response, total, is_last)
+        else:
+            # it seams that search_users can return a list() containing a single user!
+            return ResultList([item_type(self._options, self._session, resource)], 0, 1, 1, True)
 
     # Information about this client
 
@@ -301,7 +449,7 @@ class JIRA(object):
                 len(self._session._async_jobs), size))
             threaded_requests.map(self._session._async_jobs, size=size)
 
-        # Application properties
+            # Application properties
 
     # non-resource
     def application_properties(self, key=None):
@@ -323,7 +471,7 @@ class JIRA(object):
         :param value: value to assign to the property
         """
         url = self._options['server'] + \
-            '/rest/api/2/application-properties/' + key
+            '/rest/api/latest/application-properties/' + key
         payload = {
             'id': key,
             'value': value
@@ -341,7 +489,7 @@ class JIRA(object):
         if cached and hasattr(self, '_applicationlinks'):
             return self._applicationlinks
 
-        #url = self._options['server'] + '/rest/applinks/latest/applicationlink'
+        # url = self._options['server'] + '/rest/applinks/latest/applicationlink'
         url = self._options['server'] + \
             '/rest/applinks/latest/listApplicationlinks'
 
@@ -411,7 +559,10 @@ class JIRA(object):
             r = self._session.post(
                 url, data=m, headers=CaseInsensitiveDict({'content-type': m.content_type, 'X-Atlassian-Token': 'nocheck'}), retry_data=file_stream)
 
-        attachment = Attachment(self._options, self._session, json_loads(r)[0])
+        js = json_loads(r)
+        if not js or not isinstance(js, collections.Iterable):
+            raise JIRAError("Unable to parse JSON: %s" % js)
+        attachment = Attachment(self._options, self._session, js[0])
         if attachment.size == 0:
             raise JIRAError("Added empty attachment via %s method?!: r: %s\nattachment: %s" % (method, r, attachment))
         return attachment
@@ -485,19 +636,15 @@ class JIRA(object):
 
         :param filter: either "favourite" or "my", the type of dashboards to return
         :param startAt: index of the first dashboard to return
-        :param maxResults: maximum number of dashboards to return. The total number of
-            results is always available in the ``total`` attribute of the returned ResultList.
+        :param maxResults: maximum number of dashboards to return.
+            If maxResults evaluates as False, it will try to get all items in batches.
+
+        :rtype ResultList
         """
         params = {}
         if filter is not None:
             params['filter'] = filter
-        params['startAt'] = startAt
-        params['maxResults'] = maxResults
-
-        r_json = self._get_json('dashboard', params=params)
-        dashboards = [Dashboard(self._options, self._session, raw_dash_json)
-                      for raw_dash_json in r_json['dashboards']]
-        return ResultList(dashboards, r_json['total'])
+        return self._fetch_pages(Dashboard, 'dashboards', 'dashboard', startAt, maxResults, params)
 
     def dashboard(self, id):
         """
@@ -559,26 +706,55 @@ class JIRA(object):
         raw_filter_json = json_loads(r)
         return Filter(self._options, self._session, raw=raw_filter_json)
 
-    # Groups
+    def update_filter(self, filter_id,
+                      name=None, description=None,
+                      jql=None, favourite=None):
+        """
+        Updates a filter and return a filter Resource for it.
+
+        Keyword arguments:
+        name -- name of the new filter
+        description -- useful human readable description of the new filter
+        jql -- query string that defines the filter
+        favourite -- whether to add this filter to the current user's favorites
+
+        """
+        filter = self.filter(filter_id)
+        data = {}
+        data['name'] = name or filter.name
+        data['description'] = description or filter.description
+        data['jql'] = jql or filter.jql
+        data['favourite'] = favourite or filter.favourite
+
+        url = self._get_url('filter/%s' % filter_id)
+        r = self._session.put(url, headers={'content-type': 'application/json'},
+                              data=json.dumps(data))
+
+        raw_filter_json = json.loads(r.text)
+        return Filter(self._options, self._session, raw=raw_filter_json)
+
+# Groups
 
     # non-resource
-    def groups(self, query=None, exclude=None, maxResults=None):
+    def groups(self, query=None, exclude=None, maxResults=9999):
         """
         Return a list of groups matching the specified criteria.
 
-        Keyword arguments:
-        query -- filter groups by name with this string
-        exclude -- filter out groups by name with this string
-        maxResults -- maximum results to return. defaults to system property jira.ajax.autocomplete.limit (20)
+        :param query: filter groups by name with this string
+        :param exclude: filter out groups by name with this string
+        :param maxResults: maximum results to return. defaults to 9999
         """
         params = {}
+        groups = []
         if query is not None:
             params['query'] = query
         if exclude is not None:
             params['exclude'] = exclude
         if maxResults is not None:
             params['maxResults'] = maxResults
-        return self._get_json('groups/picker', params=params)
+        for group in self._get_json('groups/picker', params=params)['groups']:
+            groups.append(group['name'])
+        return sorted(groups)
 
     def group_members(self, group):
         """
@@ -614,7 +790,6 @@ class JIRA(object):
         :param groupname: The name of the group you wish to create.
         :return: Boolean - True if succesfull.
         '''
-
         url = self._options['server'] + '/rest/api/latest/group'
 
         # implementation based on
@@ -702,6 +877,12 @@ class JIRA(object):
         if isinstance(p, string_types) or isinstance(p, integer_types):
             data['fields']['project'] = {'id': self.project(p).id}
 
+        p = data['fields']['issuetype']
+        if isinstance(p, integer_types):
+            data['fields']['issuetype'] = {'id': p}
+        if isinstance(p, string_types) or isinstance(p, integer_types):
+            data['fields']['issuetype'] = {'id': self.issue_type_by_name(p).id}
+
         url = self._get_url('issue')
         r = self._session.post(url, data=json.dumps(data))
 
@@ -752,10 +933,12 @@ class JIRA(object):
         :param assignee: the user to assign the issue to
         """
         url = self._options['server'] + \
-            '/rest/api/2/issue/' + str(issue) + '/assignee'
+            '/rest/api/latest/issue/' + str(issue) + '/assignee'
         payload = {'name': assignee}
         r = self._session.put(
             url, data=json.dumps(payload))
+        raise_on_error(r)
+        return True
 
     @translate_resource_args
     def comments(self, issue):
@@ -854,9 +1037,23 @@ class JIRA(object):
         :param application: application information for the link (see the above link for details)
         :param relationship: relationship description for the link (see the above link for details)
         """
-        warnings.warn(
-            "broken: see https://bitbucket.org/bspeakmon/jira-python/issue/46 and https://jira.atlassian.com/browse/JRA-38551",
-            Warning)
+
+        try:
+            applicationlinks = self.applicationlinks()
+        except JIRAError as e:
+            applicationlinks = []
+            # In many (if not most) configurations, non-admin users are
+            # not allowed to list applicationlinks; if we aren't allowed,
+            # let's let people try to add remote links anyway, we just
+            # won't be able to be quite as helpful.
+            warnings.warn(
+                "Unable to gather applicationlinks; you will not be able "
+                "to add links to remote issues: (%s) %s" % (
+                    e.status_code,
+                    e.text
+                ),
+                Warning
+            )
 
         data = {}
         if type(destination) == Issue:
@@ -866,7 +1063,7 @@ class JIRA(object):
                 'url': destination.permalink()
             }
 
-            for x in self.applicationlinks():
+            for x in applicationlinks:
                 if x['application']['displayUrl'] == destination._options['server']:
                     data['globalId'] = "appId=%s&issueId=%s" % (
                         x['application']['id'], destination.raw['id'])
@@ -888,7 +1085,7 @@ class JIRA(object):
             data['relationship'] = relationship
 
         # check if the link comes from one of the configured application links
-        for x in self.applicationlinks():
+        for x in applicationlinks:
             if x['application']['displayUrl'] == self._options['server']:
                 data['globalId'] = "appId=%s&issueId=%s" % (
                     x['application']['id'], destination.raw['id'])
@@ -903,6 +1100,31 @@ class JIRA(object):
         remote_link = RemoteLink(
             self._options, self._session, raw=json_loads(r))
         return remote_link
+
+    def add_simple_link(self, issue, object):
+        """
+        Add a simple remote link from an issue to web resource.  This avoids the admin access problems from add_remote_link by just using a simple object and presuming all fields are correct and not requiring more complex ``application`` data.
+            ``object`` should be a dict containing at least ``url`` to the linked external URL
+             and ``title`` to display for the link inside JIRA.
+
+        For definitions of the allowable fields for ``object`` , see https://developer.atlassian.com/display/JIRADEV/JIRA+REST+API+for+Remote+Issue+Links.
+
+        :param issue: the issue to add the remote link to
+        :param object: the dictionary used to create remotelink data
+        """
+
+        data = {}
+
+        # hard code data dict to be passed as ``object`` to avoid any permissions errors
+        data = object
+
+        url = self._get_url('issue/' + str(issue) + '/remotelink')
+        r = self._session.post(
+            url, data=json.dumps(data))
+
+        simple_link = RemoteLink(
+            self._options, self._session, raw=json_loads(r))
+        return simple_link
 
     # non-resource
     @translate_resource_args
@@ -983,6 +1205,12 @@ class JIRA(object):
         url = self._get_url('issue/' + str(issue) + '/transitions')
         r = self._session.post(
             url, data=json.dumps(data))
+        try:
+            r_json = json_loads(r)
+        except ValueError as e:
+            logging.error("%s\n%s" % (e, r.text))
+            raise e
+        return r_json
 
     @translate_resource_args
     def votes(self, issue):
@@ -1108,7 +1336,7 @@ class JIRA(object):
             data['started'] = started.strftime("%Y-%m-%dT%H:%M:%S.000%z")
         if user is not None:
             data['author'] = {"name": user,
-                              'self': self.JIRA_BASE_URL + '/rest/api/2/user?username=' + user,
+                              'self': self.JIRA_BASE_URL + '/rest/api/latest/user?username=' + user,
                               'displayName': user,
                               'active': False
                               }
@@ -1210,6 +1438,14 @@ class JIRA(object):
         :param id: ID of the issue type to get
         """
         return self._find_for_resource(IssueType, id)
+
+    def issue_type_by_name(self, name):
+        issue_types = self.issue_types()
+        try:
+            issue_type = [it for it in issue_types if it.name == name][0]
+        except IndexError:
+            raise KeyError("Issue type '%s' is unknown." % name)
+        return issue_type
 
     # User permissions
 
@@ -1404,7 +1640,9 @@ class JIRA(object):
 
         :param project: ID or key of the project to get roles from
         """
-        return self._get_json('project/' + project + '/role')
+        roles_dict = self._get_json('project/' + project + '/role')
+
+        # TODO: return on a list of Roles()
 
     @translate_resource_args
     def project_role(self, project, id):
@@ -1414,6 +1652,8 @@ class JIRA(object):
         :param project: ID or key of the project to get the role from
         :param id: ID of the role to get
         """
+        if isinstance(id, Number):
+            id = "%s" % id
         return self._find_for_resource(Role, (project, id))
 
     # Resolutions
@@ -1444,21 +1684,27 @@ class JIRA(object):
         :param startAt: index of the first issue to return
         :param maxResults: maximum number of issues to return. Total number of results
             is available in the ``total`` attribute of the returned ResultList.
-            If maxResults evaluates as False, it will try to get all issues in batches of 50.
+            If maxResults evaluates as False, it will try to get all issues in batches.
         :param fields: comma-separated string of issue fields to include in the results
         :param expand: extra information to fetch inside each resource
+        :param json_result: JSON response will be returned when this parameter is set to True.
+                Otherwise, ResultList will be returned.
         """
         # TODO what to do about the expand, which isn't related to the issues?
-        infinite = False
-        maxi = 50
-        idx = 0
         if fields is None:
             fields = []
 
-        # If None is passed as parameter, this fetch all issues from the query
-        if not maxResults:
-            maxResults = maxi
-            infinite = True
+        if isinstance(fields, string_types):
+            fields = fields.split(",")
+
+        # this will translate JQL field names to REST API Name
+        # most people do know the JQL names so this will help them use the API easier
+        untranslate = {}  # use to add friendly aliases when we get the results back
+        if self._fields:
+            for i, field in enumerate(fields):
+                if field in self._fields:
+                    untranslate[self._fields[field]] = fields[i]
+                    fields[i] = self._fields[field]
 
         search_params = {
             "jql": jql_str,
@@ -1469,23 +1715,19 @@ class JIRA(object):
             "expand": expand
         }
         if json_result:
+            if not maxResults:
+                warnings.warn('All issues cannot be fetched at once, when json_result parameter is set', Warning)
             return self._get_json('search', params=search_params)
 
-        resource = self._get_json('search', params=search_params)
-        issues = [Issue(self._options, self._session, raw_issue_json)
-                  for raw_issue_json in resource['issues']]
-        cnt = len(issues)
-        total = resource['total']
-        if infinite:
-            while cnt == maxi:
-                idx += maxi
-                search_params["startAt"] = idx
-                resource = self._get_json('search', params=search_params)
-                issue_batch = [Issue(self._options, self._session, raw_issue_json) for raw_issue_json in
-                               resource['issues']]
-                issues.extend(issue_batch)
-                cnt = len(issue_batch)
-        return ResultList(issues, total)
+        issues = self._fetch_pages(Issue, 'issues', 'search', startAt, maxResults, search_params)
+
+        if untranslate:
+            for i in issues:
+                for k, v in iteritems(untranslate):
+                    if k in i.raw['fields']:
+                        i.raw['fields'][v] = i.raw['fields'][k]
+
+        return issues
 
     # Security levels
     def security_level(self, id):
@@ -1501,7 +1743,17 @@ class JIRA(object):
     # non-resource
     def server_info(self):
         """Get a dict of server information for this JIRA instance."""
-        return self._get_json('serverInfo')
+        retry = 0
+        j = self._get_json('serverInfo')
+        while not j and retry < 3:
+            logging.warning("Bug https://jira.atlassian.com/browse/JRA-59676 trying again...")
+            retry += 1
+            j = self._get_json('serverInfo')
+        return j
+
+    def myself(self):
+        """Get a dict of server information for this JIRA instance."""
+        return self._get_json('myself')
 
     # Status
 
@@ -1543,19 +1795,14 @@ class JIRA(object):
         :param username: a string to match usernames against
         :param projectKeys: comma-separated list of project keys to check for issue assignment permissions
         :param startAt: index of the first user to return
-        :param maxResults: maximum number of users to return
+        :param maxResults: maximum number of users to return.
+                If maxResults evaluates as False, it will try to get all users in batches.
         """
         params = {
             'username': username,
             'projectKeys': projectKeys,
-            'startAt': startAt,
-            'maxResults': maxResults
         }
-        r_json = self._get_json(
-            'user/assignable/multiProjectSearch', params=params)
-        users = [User(self._options, self._session, raw_user_json)
-                 for raw_user_json in r_json]
-        return users
+        return self._fetch_pages(User, None, 'user/assignable/multiProjectSearch', startAt, maxResults, params)
 
     def search_assignable_users_for_issues(self, username, project=None, issueKey=None, expand=None, startAt=0,
                                            maxResults=50):
@@ -1572,12 +1819,11 @@ class JIRA(object):
         :param issueKey: filter returned users by this issue (expected if a result will be used to edit this issue)
         :param expand: extra information to fetch inside each resource
         :param startAt: index of the first user to return
-        :param maxResults: maximum number of users to return
+        :param maxResults: maximum number of users to return.
+                If maxResults evaluates as False, it will try to get all items in batches.
         """
         params = {
-            'username': username,
-            'startAt': startAt,
-            'maxResults': maxResults,
+            'username': username
         }
         if project is not None:
             params['project'] = project
@@ -1585,10 +1831,7 @@ class JIRA(object):
             params['issueKey'] = issueKey
         if expand is not None:
             params['expand'] = expand
-        r_json = self._get_json('user/assignable/search', params)
-        users = [User(self._options, self._session, raw_user_json)
-                 for raw_user_json in r_json]
-        return users
+        return self._fetch_pages(User, None, 'user/assignable/search', startAt, maxResults, params)
 
     # non-resource
     def user_avatars(self, username):
@@ -1627,6 +1870,9 @@ class JIRA(object):
         size_from_file = os.path.getsize(filename)
         if size != size_from_file:
             size = size_from_file
+
+        # remove path from filename
+        filename = os.path.split(filename)[1]
 
         params = {
             'username': user,
@@ -1695,46 +1941,40 @@ class JIRA(object):
         """
         Get a list of user Resources that match the specified search string.
 
-        :param user: a string to match usernames, name or email against
-        :param startAt: index of the first user to return
-        :param maxResults: maximum number of users to return
+        :param user: a string to match usernames, name or email against.
+        :param startAt: index of the first user to return.
+        :param maxResults: maximum number of users to return.
+                If maxResults evaluates as False, it will try to get all items in batches.
+        :param includeActive: If true, then active users are included in the results.
+        :param includeInactive: If true, then inactive users are included in the results.
         """
         params = {
             'username': user,
-            'startAt': startAt,
-            'maxResults': maxResults,
             'includeActive': includeActive,
             'includeInactive': includeInactive
         }
-        r_json = self._get_json('user/search', params=params)
-        users = [User(self._options, self._session, raw_user_json)
-                 for raw_user_json in r_json]
-        return users
+        return self._fetch_pages(User, None, 'user/search', startAt, maxResults, params)
 
     def search_allowed_users_for_issue(self, user, issueKey=None, projectKey=None, startAt=0, maxResults=50):
         """
         Get a list of user Resources that match a username string and have browse permission for the issue or
         project.
 
-        :param user: a string to match usernames against
-        :param issueKey: find users with browse permission for this issue
-        :param projectKey: find users with browse permission for this project
-        :param startAt: index of the first user to return
-        :param maxResults: maximum number of users to return
+        :param user: a string to match usernames against.
+        :param issueKey: find users with browse permission for this issue.
+        :param projectKey: find users with browse permission for this project.
+        :param startAt: index of the first user to return.
+        :param maxResults: maximum number of users to return.
+                If maxResults evaluates as False, it will try to get all items in batches.
         """
         params = {
-            'username': user,
-            'startAt': startAt,
-            'maxResults': maxResults,
+            'username': user
         }
         if issueKey is not None:
             params['issueKey'] = issueKey
         if projectKey is not None:
             params['projectKey'] = projectKey
-        r_json = self._get_json('user/viewissue/search', params)
-        users = [User(self._options, self._session, raw_user_json)
-                 for raw_user_json in r_json]
-        return users
+        return self._fetch_pages(User, None, 'user/viewissue/search', startAt, maxResults, params)
 
     # Versions
 
@@ -1878,6 +2118,28 @@ class JIRA(object):
         self._session.verify = verify
         self._session.auth = oauth
 
+    @staticmethod
+    def _timestamp(dt=None):
+        t = datetime.datetime.utcnow()
+        if dt is not None:
+            t += dt
+        return calendar.timegm(t.timetuple())
+
+    def _create_jwt_session(self, jwt):
+        try:
+            jwt_auth = JWTAuth(jwt['secret'], alg='HS256')
+        except NameError as e:
+            logging.error("JWT authentication requires requests_jwt")
+            raise e
+        jwt_auth.add_field("iat", lambda req: JIRA._timestamp())
+        jwt_auth.add_field("exp", lambda req: JIRA._timestamp(datetime.timedelta(minutes=3)))
+        jwt_auth.add_field("qsh", QshGenerator(self._options['context_path']))
+        for f in jwt['payload'].items():
+            jwt_auth.add_field(f[0], f[1])
+        self._session = ResilientSession()
+        self._session.verify = self._options['verify']
+        self._session.auth = jwt_auth
+
     def _set_avatar(self, params, url, avatar):
         data = {
             'id': avatar
@@ -1885,7 +2147,7 @@ class JIRA(object):
         r = self._session.put(url, params=params, data=json.dumps(data))
 
     def _get_url(self, path, base=JIRA_BASE_URL):
-        options = self._options
+        options = self._options.copy()
         options.update({'path': path})
         return base.format(**options)
 
@@ -1916,7 +2178,9 @@ class JIRA(object):
         else:
             try:
                 _magic = magic.Magic(flags=magic.MAGIC_MIME_TYPE)
-                cleanup = lambda _: _magic.close()
+
+                def cleanup(x):
+                    _magic.close()
                 self._magic_weakref = weakref.ref(self, cleanup)
                 self._magic = _magic
             except TypeError:
@@ -1971,7 +2235,7 @@ class JIRA(object):
 
         if self._version >= (6, 0, 0):
 
-            url = self._options['server'] + '/rest/api/2/user'
+            url = self._options['server'] + '/rest/api/latest/user'
             payload = {
                 "name": new_user,
             }
@@ -1993,8 +2257,7 @@ class JIRA(object):
             except:
                 merge = "false"
 
-            url = self._options[
-                'server'] + '/secure/admin/groovy/CannedScriptRunner.jspa#result'
+            url = self._options['server'] + '/secure/admin/groovy/CannedScriptRunner.jspa#result'
             payload = {
                 "cannedScript": "com.onresolve.jira.groovy.canned.admin.RenameUser",
                 "cannedScriptArgs_FIELD_FROM_USER_ID": old_user,
@@ -2042,19 +2305,16 @@ class JIRA(object):
             # let's check if the user still exists
             try:
                 self.user(old_user)
-            except:
-                logging.error("User %s does not exists." % old_user)
+            except Exception as e:
+                logging.error("User %s does not exists. %s", old_user, e)
                 return msg
 
-            logging.error(msg)
-            logging.error(
-                "User %s does still exists after rename, that's clearly a problem." % old_user)
+            logging.error(msg + '\n' + "User %s does still exists after rename, that's clearly a problem." % old_user)
             return False
 
     def delete_user(self, username):
 
-        url = self._options['server'] + \
-            '/rest/api/latest/user/?username=%s' % username
+        url = self._options['server'] + '/rest/api/latest/user/?username=%s' % username
 
         r = self._session.delete(url)
         if 200 <= r.status_code <= 299:
@@ -2150,10 +2410,21 @@ class JIRA(object):
             if not found:
                 logging.error("Unable to recognize project `%s`" % pid)
                 return False
-        url = self._options['server'] + '/secure/admin/DeleteProject.jspa'
+
+        uri = '/secure/project/DeleteProject.jspa'
+        url = self._options['server'] + uri
         payload = {'pid': pid, 'Delete': 'Delete', 'confirm': 'true'}
+        # try:
+        #     r = self._gain_sudo_session(payload, uri)
+        #     if r.status_code != 200 or not self._check_for_html_error(r.text):
+        #         return False
+        # except JIRAError as e:
+        #     raise JIRAError(0, "You must have global administrator rights to delete projects.")
+        #     return False
+
         r = self._session.post(
             url, headers=CaseInsensitiveDict({'content-type': 'application/x-www-form-urlencoded'}), data=payload)
+
         if r.status_code == 200:
             return self._check_for_html_error(r.text)
         else:
@@ -2161,7 +2432,24 @@ class JIRA(object):
                 'Got %s response from calling delete_project.' % r.status_code)
             return r.status_code
 
-    def create_project(self, key, name=None, assignee=None):
+    def _gain_sudo_session(self, options, destination):
+        url = self._options['server'] + '/secure/admin/WebSudoAuthenticate.jspa'
+
+        if not self._session.auth:
+            self._session.auth = get_netrc_auth(url)
+
+        payload = {
+            'webSudoPassword': self._session.auth[1],
+            'webSudoDestination': destination,
+            'webSudoIsPost': 'true',
+        }
+
+        payload.update(options)
+
+        return self._session.post(
+            url, headers=CaseInsensitiveDict({'content-type': 'application/x-www-form-urlencoded'}), data=payload)
+
+    def create_project(self, key, name=None, assignee=None, type="Software"):
         """
         Key is mandatory and has to match JIRA project key requirements, usually only 2-10 uppercase characters.
         If name is not specified it will use the key value.
@@ -2177,22 +2465,22 @@ class JIRA(object):
                 'key parameter is not all uppercase alphanumeric of length between 2 and 10')
             return False
         url = self._options['server'] + \
-            '/rest/project-templates/1.0/templates'
+            '/rest/project-templates/latest/templates'
 
         r = self._session.get(url)
         j = json_loads(r)
 
         template_key = None
         templates = []
-        for template in j['projectTemplates']:
+        for template in _get_template_list(j):
             templates.append(template['name'])
-            if template['name'] in ['JIRA Classic', 'JIRA Default Schemes']:
+            if template['name'] in ['JIRA Classic', 'JIRA Default Schemes', 'Basic software development']:
                 template_key = template['projectTemplateModuleCompleteKey']
                 break
 
         if not template_key:
             raise JIRAError(
-                "Unable to find a suitable project template to use. Found only: " + ', '.join(templates))
+                "Unable to find a suitable project template to use. Found only: %s" % json.dumps(j))
 
         payload = {'name': name,
                    'key': key,
@@ -2204,6 +2492,10 @@ class JIRA(object):
                    'lead': assignee,
                    #'assigneeType': '2',
                    }
+
+        if self._version[0] > 6:
+            # JIRA versions before 7 will throw an error if we specify type parameter
+            payload['type'] = type
 
         headers = CaseInsensitiveDict(
             {'Content-Type': 'application/x-www-form-urlencoded'})
@@ -2224,9 +2516,27 @@ class JIRA(object):
                     f.name, r.status_code))
         return False
 
-    def add_user(self, username, email, directoryId=1, password=None, fullname=None, sendEmail=False, active=True):
-
-        fullname = username
+    def add_user(self, username, email, directoryId=1, password=None,
+                 fullname=None, notify=False, active=True, ignore_existing=False):
+        '''
+        Creates a new JIRA user
+        :param username: the username of the new user
+        :type username: ``str``
+        :param email: email address of the new user
+        :type email: ``str``
+        :param directoryId: the directory ID the new user should be a part of
+        :type directoryId: ``int``
+        :param password: Optional, the password for the new user
+        :type password: ``str``
+        :param fullname: Optional, the full name of the new user
+        :type fullname: ``str``
+        :param notify: Whether or not to send a notification to the new user
+        :type notify: ``bool``
+        :param active: Whether or not to make the new user active upon creation
+        :type active: ``bool``
+        '''
+        if not fullname:
+            fullname = username
         # TODO: default the directoryID to the first directory in jira instead
         # of 1 which is the internal one.
         url = self._options['server'] + '/rest/api/latest/user'
@@ -2240,10 +2550,17 @@ class JIRA(object):
         x['name'] = username
         if password:
             x['password'] = password
+        if notify:
+            x['notification'] = 'True'
 
         payload = json.dumps(x)
-
-        self._session.post(url, data=payload)
+        try:
+            self._session.post(url, data=payload)
+        except JIRAError as e:
+            err = e.response.json()['errors']
+            if 'username' in err and err['username'] == 'A user with that username already exists.' and ignore_existing:
+                return True
+            raise e
         return True
 
     def add_user_to_group(self, username, group):
@@ -2307,51 +2624,82 @@ class JIRA(object):
     """
 
     @translate_resource_args
-    def boards(self):
+    def boards(self, startAt=0, maxResults=50, type=None, name=None):
         """
-        Get a list of board GreenHopperResources.
-        """
-        r_json = self._get_json(
-            'rapidviews/list', base=self.AGILE_BASE_URL)
+        Get a list of board resources.
 
-        boards = [Board(self._options, self._session, raw_boards_json)
-                  for raw_boards_json in r_json['views']]
-        return boards
+        :param startAt: The starting index of the returned boards. Base index: 0.
+        :param maxResults: The maximum number of boards to return per page. Default: 50
+        :param type: Filters results to boards of the specified type. Valid values: scrum, kanban.
+        :param name: Filters results to boards that match or partially match the specified name.
+        :rtype: ResultList[Board]
+
+        When old GreenHopper private API is used, paging is not enabled and all parameters are ignored.
+        """
+
+        params = {}
+        if type:
+            params['type'] = type
+        if name:
+            params['name'] = name
+
+        if self._options['agile_rest_path'] == GreenHopperResource.GREENHOPPER_REST_PATH:
+            # Old, private API did not support pagination, all records were present in response,
+            #   and no parameters were supported.
+            if startAt or maxResults or params:
+                warnings.warn('Old private GreenHopper API is used, all parameters will be ignored.', Warning)
+
+            r_json = self._get_json('rapidviews/list', base=self.AGILE_BASE_URL)
+            boards = [Board(self._options, self._session, raw_boards_json) for raw_boards_json in r_json['views']]
+            return ResultList(boards, 0, len(boards), len(boards), True)
+        else:
+            return self._fetch_pages(Board, 'values', 'board', startAt, maxResults, params, base=self.AGILE_BASE_URL)
 
     @translate_resource_args
-    def sprints(self, id, extended=False):
+    def sprints(self, board_id, extended=False, startAt=0, maxResults=50, state=None):
         """
         Get a list of sprint GreenHopperResources.
 
-        :param id: the board to get sprints from
-        :param extended: fetch additional information like startDate, endDate, completeDate,
-            much slower because it requires an additional requests for each sprint
-        :rtype: dict
-             >>> { "id": 893,
-             >>> "name": "iteration.5",
-             >>> "state": "FUTURE",
-             >>> "linkedPagesCount": 0,
-             >>> "startDate": "None",
-             >>> "endDate": "None",
-             >>> "completeDate": "None",
-             >>> "remoteLinks": []
-             >>> }
+        :param board_id: the board to get sprints from
+        :param extended: Used only by old GreenHopper API to fetch additional information like
+            startDate, endDate, completeDate, much slower because it requires an additional requests for each sprint.
+            New JIRA Agile API always returns this information without a need for additional requests.
+        :param startAt: the index of the first sprint to return (0 based)
+        :param maxResults: the maximum number of sprints to return
+        :param state: Filters results to sprints in specified states. Valid values: future, active, closed.
+            You can define multiple states separated by commas
+
+        :rtype dict
+        :return (content depends on API version, but always contains id, name, state, startDate and endDate)
+
+        When old GreenHopper private API is used, paging is not enabled,
+            and `startAt`, `maxResults` and `state` parameters are ignored.
         """
-        r_json = self._get_json('sprintquery/%s?includeHistoricSprints=true&includeFutureSprints=true' % id,
-                                base=self.AGILE_BASE_URL)
 
-        if extended:
-            sprints = []
-            for raw_sprints_json in r_json['sprints']:
-                r_json = self._get_json(
-                    'sprint/%s/edit/model' % raw_sprints_json['id'], base=self.AGILE_BASE_URL)
-                sprints.append(
-                    Sprint(self._options, self._session, r_json['sprint']))
+        params = {}
+        if state:
+            if isinstance(state, string_types):
+                state = state.split(",")
+            params['state'] = state
+
+        if self._options['agile_rest_path'] == GreenHopperResource.GREENHOPPER_REST_PATH:
+            r_json = self._get_json('sprintquery/%s?includeHistoricSprints=true&includeFutureSprints=true' % board_id,
+                                    base=self.AGILE_BASE_URL)
+
+            if params:
+                warnings.warn('Old private GreenHopper API is used, parameters %s will be ignored.' % params, Warning)
+
+            if extended:
+                sprints = [Sprint(self._options, self._session, self.sprint_info(None, raw_sprints_json['id']))
+                           for raw_sprints_json in r_json['sprints']]
+            else:
+                sprints = [Sprint(self._options, self._session, raw_sprints_json)
+                           for raw_sprints_json in r_json['sprints']]
+
+            return ResultList(sprints, 0, len(sprints), len(sprints), True)
         else:
-            sprints = [Sprint(self._options, self._session, raw_sprints_json)
-                       for raw_sprints_json in r_json['sprints']]
-
-        return sprints
+            return self._fetch_pages(Sprint, 'values', 'board/%s/sprint' % board_id, startAt, maxResults, params,
+                                     self.AGILE_BASE_URL)
 
     def sprints_by_name(self, id, extended=False):
         sprints = {}
@@ -2363,16 +2711,18 @@ class JIRA(object):
                     "Fatal error, duplicate Sprint Name (%s) found on board %s." % (s.name, id)))
         return sprints
 
-    def update_sprint(self, id, name=None, startDate=None, endDate=None):
+    def update_sprint(self, id, name=None, startDate=None, endDate=None, state=None):
         payload = {}
         if name:
             payload['name'] = name
         if startDate:
             payload['startDate'] = startDate
         if endDate:
-            payload['startDate'] = endDate
-        # if state:
-        #    payload['state']=state
+            payload['endDate'] = endDate
+        if state:
+            if self._options['agile_rest_path'] != GreenHopperResource.GREENHOPPER_REST_PATH:
+                raise NotImplementedError('Public JIRA API does not support state update')
+            payload['state'] = state
 
         url = self._get_url('sprint/%s' % id, base=self.AGILE_BASE_URL)
         r = self._session.put(
@@ -2392,6 +2742,10 @@ class JIRA(object):
         # issueKeysAddedDuringSprint used to mark some with a * ?
         # puntedIssues are for scope change?
 
+        if self._options['agile_rest_path'] != GreenHopperResource.GREENHOPPER_REST_PATH:
+            raise NotImplementedError('JIRA Agile Public API does not support this request')
+        warnings.warn('JIRA.completed_issues uses deprecated API, that is going to be removed on the 1st February 2016',
+                      DeprecationWarning)
         r_json = self._get_json('rapid/charts/sprintreport?rapidViewId=%s&sprintId=%s' % (board_id, sprint_id),
                                 base=self.AGILE_BASE_URL)
         issues = [Issue(self._options, self._session, raw_issues_json) for raw_issues_json in
@@ -2402,6 +2756,11 @@ class JIRA(object):
         """
         Return the total completed points this sprint.
         """
+        if self._options['agile_rest_path'] != GreenHopperResource.GREENHOPPER_REST_PATH:
+            raise NotImplementedError('JIRA Agile Public API does not support this request')
+        warnings.warn('JIRA.completedIssuesEstimateSum uses deprecated API, that is going to be removed'
+                      ' on the 1st February 2016',
+                      DeprecationWarning)
         return self._get_json('rapid/charts/sprintreport?rapidViewId=%s&sprintId=%s' % (board_id, sprint_id),
                               base=self.AGILE_BASE_URL)['contents']['completedIssuesEstimateSum']['value']
 
@@ -2409,35 +2768,39 @@ class JIRA(object):
         """
         Return the completed issues for the sprint
         """
+        if self._options['agile_rest_path'] != GreenHopperResource.GREENHOPPER_REST_PATH:
+            raise NotImplementedError('JIRA Agile Public API does not support this request')
+        warnings.warn('JIRA.incompleted_issues uses deprecated API, that is going to be removed'
+                      'on the 1st February 2016',
+                      DeprecationWarning)
         r_json = self._get_json('rapid/charts/sprintreport?rapidViewId=%s&sprintId=%s' % (board_id, sprint_id),
                                 base=self.AGILE_BASE_URL)
         issues = [Issue(self._options, self._session, raw_issues_json) for raw_issues_json in
                   r_json['contents']['incompletedIssues']]
         return issues
 
+    # TODO: remove sprint_info() method, sprint() method suit the convention more
     def sprint_info(self, board_id, sprint_id):
         """
         Return the information about a sprint.
 
-        :param board_id: the board retrieving issues from
-        :param sprint_id: the sprint retieving issues from
+        :param board_id: the board retrieving issues from. Deprecated and ignored.
+        :param sprint_id: the sprint retrieving issues from
         """
-        return self._get_json('rapid/charts/sprintreport?rapidViewId=%s&sprintId=%s' % (board_id, sprint_id),
-                              base=self.AGILE_BASE_URL)['sprint']
+        sprint = Sprint(self._options, self._session)
+        sprint.find(sprint_id)
+        return sprint.raw
+
+    def sprint(self, id):
+        sprint = Sprint(self._options, self._session)
+        sprint.find(id)
+        return sprint
 
     # TODO: remove this as we do have Board.delete()
     def delete_board(self, id):
-        """
-        Deletes an agile board.
-
-        :param id:
-        :return:
-        """
-        payload = {}
-        url = self._get_url(
-            'rapidview/%s' % id, base=self.AGILE_BASE_URL)
-        r = self._session.delete(
-            url, data=json.dumps(payload))
+        """ Deletes an agile board. """
+        board = Board(self._options, self._session, raw={'id': id})
+        board.delete()
 
     def create_board(self, name, project_ids, preset="scrum"):
         """
@@ -2448,6 +2811,9 @@ class JIRA(object):
         :param preset: what preset to use for this board
         :type preset: 'kanban', 'scrum', 'diy'
         """
+        if self._options['agile_rest_path'] != GreenHopperResource.GREENHOPPER_REST_PATH:
+            raise NotImplementedError('JIRA Agile Public API does not support this request')
+
         payload = {}
         if isinstance(project_ids, string_types):
             ids = []
@@ -2475,38 +2841,42 @@ class JIRA(object):
         :param name: name of the sprint
         :param board_id: the board to add the sprint to
         """
-        url = self._get_url(
-            'sprint/%s' % board_id, base=self.AGILE_BASE_URL)
-        r = self._session.post(
-            url)
-        raw_issue_json = json_loads(r)
-        """ now r contains something like:
-        {
-              "id": 742,
-              "name": "Sprint 89",
-              "state": "FUTURE",
-              "linkedPagesCount": 0,
-              "startDate": "None",
-              "endDate": "None",
-              "completeDate": "None",
-              "remoteLinks": []
-        }"""
 
         payload = {'name': name}
         if startDate:
             payload["startDate"] = startDate
         if endDate:
             payload["endDate"] = endDate
-        url = self._get_url(
-            'sprint/%s' % raw_issue_json['id'], base=self.AGILE_BASE_URL)
-        r = self._session.put(
-            url, data=json.dumps(payload))
-        raw_issue_json = json_loads(r)
+
+        if self._options['agile_rest_path'] == GreenHopperResource.GREENHOPPER_REST_PATH:
+            url = self._get_url('sprint/%s' % board_id, base=self.AGILE_BASE_URL)
+            r = self._session.post(url)
+            raw_issue_json = json_loads(r)
+            """ now r contains something like:
+            {
+                  "id": 742,
+                  "name": "Sprint 89",
+                  "state": "FUTURE",
+                  "linkedPagesCount": 0,
+                  "startDate": "None",
+                  "endDate": "None",
+                  "completeDate": "None",
+                  "remoteLinks": []
+            }"""
+
+            url = self._get_url(
+                'sprint/%s' % raw_issue_json['id'], base=self.AGILE_BASE_URL)
+            r = self._session.put(
+                url, data=json.dumps(payload))
+            raw_issue_json = json_loads(r)
+        else:
+            url = self._get_url('sprint', base=self.AGILE_BASE_URL)
+            payload['originBoardId'] = board_id
+            r = self._session.post(url, data=json.dumps(payload))
+            raw_issue_json = json_loads(r)
 
         return Sprint(self._options, self._session, raw=raw_issue_json)
 
-    # TODO: broken, this API does not exsit anymore and we need to use
-    # issue.update() to perform this operaiton
     def add_issues_to_sprint(self, sprint_id, issue_keys):
         """
         Add the issues in ``issue_keys`` to the ``sprint_id``. The sprint must
@@ -2523,11 +2893,34 @@ class JIRA(object):
         :param sprint_id: the sprint to add issues to
         :param issue_keys: the issues to add to the sprint
         """
-        data = {}
-        data['issueKeys'] = issue_keys
-        url = self._get_url('sprint/%s/issues/add' %
-                            (sprint_id), base=self.AGILE_BASE_URL)
-        r = self._session.put(url, data=json.dumps(data))
+
+        if self._options['agile_rest_path'] == GreenHopperResource.AGILE_BASE_REST_PATH:
+            url = self._get_url('sprint/%s/issue' % sprint_id, base=self.AGILE_BASE_URL)
+            payload = {'issues': issue_keys}
+            try:
+                self._session.post(url, data=json.dumps(payload))
+            except JIRAError as e:
+                if e.status_code == 404:
+                    warnings.warn('Status code 404 may mean, that too old JIRA Agile version is installed.'
+                                  ' At least version 6.7.10 is required.')
+                raise
+        elif self._options['agile_rest_path'] == GreenHopperResource.GREENHOPPER_REST_PATH:
+            # In old, private API the function does not exist anymore and we need to use
+            # issue.update() to perform this operation
+            # Workaround based on https://answers.atlassian.com/questions/277651/jira-agile-rest-api-example
+
+            # Get the customFieldId for "Sprint"
+            sprint_field_name = "Sprint"
+            sprint_field_id = [f['schema']['customId'] for f in self.fields()
+                               if f['name'] == sprint_field_name][0]
+
+            data = {'idOrKeys': issue_keys, 'customFieldId': sprint_field_id,
+                    'sprintId': sprint_id, 'addToBacklog': False}
+            url = self._get_url('sprint/rank', base=self.AGILE_BASE_URL)
+            r = self._session.put(url, data=json.dumps(data))
+        else:
+            raise NotImplementedError('No API for adding issues to sprint for agile_rest_path="%s"' %
+                                      self._options['agile_rest_path'])
 
     def add_issues_to_epic(self, epic_id, issue_keys, ignore_epics=True):
         """
@@ -2537,6 +2930,10 @@ class JIRA(object):
         :param issue_keys: the issues to add to the epic
         :param ignore_epics: ignore any issues listed in ``issue_keys`` that are epics
         """
+        if self._options['agile_rest_path'] != GreenHopperResource.GREENHOPPER_REST_PATH:
+            # TODO: simulate functionality using issue.update()?
+            raise NotImplementedError('JIRA Agile Public API does not support this request')
+
         data = {}
         data['issueKeys'] = issue_keys
         data['ignoreEpics'] = ignore_epics
@@ -2545,6 +2942,7 @@ class JIRA(object):
         r = self._session.put(
             url, data=json.dumps(data))
 
+    # TODO: Both GreenHopper and new JIRA Agile API support moving more than one issue.
     def rank(self, issue, next_issue):
         """
         Rank an issue before another using the default Ranking field, the one named 'Rank'.
@@ -2552,16 +2950,35 @@ class JIRA(object):
         :param issue: issue key of the issue to be ranked before the second one.
         :param next_issue: issue key of the second issue.
         """
-        # {"issueKeys":["ANERDS-102"],"rankBeforeKey":"ANERDS-94","rankAfterKey":"ANERDS-7","customFieldId":11431}
         if not self._rank:
             for field in self.fields():
-                if field['name'] == 'Rank' and field['schema']['custom'] == "com.pyxis.greenhopper.jira:gh-global-rank":
-                    self._rank = field['schema']['customId']
-        data = {
-            "issueKeys": [issue], "rankBeforeKey": next_issue, "customFieldId": self._rank}
-        url = self._get_url('rank', base=self.AGILE_BASE_URL)
-        r = self._session.put(
-            url, data=json.dumps(data))
+                if field['name'] == 'Rank':
+                    if field['schema']['custom'] == "com.pyxis.greenhopper.jira:gh-lexo-rank":
+                        self._rank = field['schema']['customId']
+                        break
+                    elif field['schema']['custom'] == "com.pyxis.greenhopper.jira:gh-global-rank":
+                        # Obsolete since JIRA v6.3.13.1
+                        self._rank = field['schema']['customId']
+
+        if self._options['agile_rest_path'] == GreenHopperResource.AGILE_BASE_REST_PATH:
+            url = self._get_url('issue/rank', base=self.AGILE_BASE_URL)
+            payload = {'issues': [issue], 'rankBeforeIssue': next_issue, 'rankCustomFieldId': self._rank}
+            try:
+                r = self._session.put(url, data=json.dumps(payload))
+            except JIRAError as e:
+                if e.status_code == 404:
+                    warnings.warn('Status code 404 may mean, that too old JIRA Agile version is installed.'
+                                  ' At least version 6.7.10 is required.')
+                raise
+        elif self._options['agile_rest_path'] == GreenHopperResource.GREENHOPPER_REST_PATH:
+            # {"issueKeys":["ANERDS-102"],"rankBeforeKey":"ANERDS-94","rankAfterKey":"ANERDS-7","customFieldId":11431}
+            data = {
+                "issueKeys": [issue], "rankBeforeKey": next_issue, "customFieldId": self._rank}
+            url = self._get_url('rank', base=self.AGILE_BASE_URL)
+            r = self._session.put(url, data=json.dumps(data))
+        else:
+            raise NotImplementedError('No API for ranking issues for agile_rest_path="%s"' %
+                                      self._options['agile_rest_path'])
 
 
 class GreenHopper(JIRA):
@@ -2569,6 +2986,5 @@ class GreenHopper(JIRA):
     def __init__(self, options=None, basic_auth=None, oauth=None, async=None):
         warnings.warn(
             "GreenHopper() class is deprecated, just use JIRA() instead.", DeprecationWarning)
-        self._rank = None
         JIRA.__init__(
             self, options=options, basic_auth=basic_auth, oauth=oauth, async=async)

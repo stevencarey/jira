@@ -116,7 +116,11 @@ def process_config():
         basic_auth = {}
 
     if parser.has_section('oauth'):
-        oauth = dict(parser.items('oauth'))
+        oauth = {}
+        for option, value in parser.items('oauth'):
+            if option in ("oauth_dance", "print_tokens"):
+                value = parser.getboolean('oauth', option)
+            oauth[option] = value
     else:
         oauth = {}
 
@@ -194,9 +198,7 @@ def process_command_line():
         with open(args.key_cert, 'r') as key_cert_file:
             key_cert_data = key_cert_file.read()
 
-    oauth = {
-        'oauth_dance': False,
-    }
+    oauth = {}
     if args.oauth_dance:
         oauth = {
             'oauth_dance': True,
@@ -241,9 +243,12 @@ def main():
     if basic_auth:
         basic_auth = (basic_auth['username'], basic_auth['password'])
 
-    if oauth['oauth_dance']:
+    if oauth.get('oauth_dance') is True:
         oauth = oauth_dance(
             options['server'], oauth['consumer_key'], oauth['key_cert'], oauth['print_tokens'], options['verify'])
+    elif not all((oauth.get('access_token'), oauth.get('access_token_secret'),
+                  oauth.get('consumer_key'), oauth.get('key_cert'))):
+        oauth = None
 
     jira = JIRA(options=options, basic_auth=basic_auth, oauth=oauth)
 

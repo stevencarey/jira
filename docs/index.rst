@@ -3,19 +3,26 @@
    You can adapt this file completely to your liking, but it should at least
    contain the root `toctree` directive.
 
-Welcome to jira-python's documentation!
-==============================================
 
-.. toctree::
-   :maxdepth: 2
+Python JIRA
+###########
+Python library to work with JIRA APIs
+
+.. contents::
+.. section-numbering::
+.. :depth: 2
+
 
 This documents the ``jira-python`` package (version |release|), a Python library designed to ease the use of the
 JIRA REST API. Some basic support for the GreenHopper REST API also exists.
 
 The source is stored at https://github.com/pycontribs/jira.
 
+Until someone will find a better way to generate the release notes you can read
+https://github.com/pycontribs/jira/blob/master/CHANGELOG which is generated based on git commit messages.
+
 Installation
-============
+************
 
 The easiest (and best) way to install jira-python is through `pip <http://www.pip-installer.org/>`_::
 
@@ -39,48 +46,49 @@ Source packages are also available at PyPI:
 .. _Dependencies:
 
 Dependencies
-------------
+============
+
 
 Python
-^^^^^^
+------
 Python 2.7 and Python 3.x are both supported.
 
 Requests
-^^^^^^^^
+--------
 Kenneth Reitz's indispensable `python-requests <http://docs.python-requests.org>`_ library handles the HTTP
 business. Usually, the latest version available at time of release is the minimum version required; at this writing,
 that version is 1.2.0, but any version >= 1.0.0 should work.
 
 requests-oauthlib
-^^^^^^^^^^^^^^^^^
+-----------------
 Used to implement OAuth. The latest version as of this writing is 0.3.3.
 
 IPython
-^^^^^^^
+-------
 The `IPython enhanced Python interpreter <http://ipython.org>`_ provides the fancy chrome used by
 :ref:`jirashell-label`. As with Requests, the latest version available at release time is required; at this writing,
 that's 0.13.
 
 filemagic
-^^^^^^^^^^^^
+---------
 This library handles content-type autodetection for things like image uploads. This will only work on a system that
 provides libmagic; Mac and Unix will almost always have it preinstalled, but Windows users will have to use Cygwin
 or compile it natively. If your system doesn't have libmagic, you'll have to manually specify the ``contentType``
 parameter on methods that take an image object, such as project and user avater creation.
 
 tlslite
-^^^^^^^
+-------
 This is a TLS implementation that handles key signing. It's used to help implement the OAuth handshaking.
 
 PyCrypto
-^^^^^^^^
+--------
 This is required for the RSA-SHA1 used by OAuth. Please note that it's **not** installed automatically, since it's
 a fairly cumbersome process in Windows. On Linux and OS X, a ``pip install pycrypto`` should do it.
 
 Installing through pip takes care of these dependencies for you.
 
 Examples
-========
+********
 
 Here's a quick usage example:
 
@@ -227,7 +235,7 @@ Updating components::
 
 
 Fields
-~~~~~~
+------
 
     issue.fields.worklogs                                 # list of Worklog objects
     issue.fields.worklogs[0].author
@@ -249,7 +257,7 @@ Fields
 
 
 Searching
-^^^^^^^^^
+---------
 
 Leverage the power of `JQL <https://confluence.atlassian.com/display/JIRA/Advanced+Searching>`_
 to quickly find the issues you want::
@@ -264,12 +272,12 @@ to quickly find the issues you want::
     print [issue.fields.summary for issue in jira.search_issues('reporter = currentUser() order by created desc', maxResults=3)]
 
 Comments
-^^^^^^^^
+--------
 
 Comments, like issues, are objects. Get at issue comments through the parent Issue object or the JIRA object's
 dedicated method::
 
-    comments_a = issue.fields.comments.comments
+    comments_a = issue.fields.comment.comments
     comments_b = jira.comments(issue) # comments_b == comments_a
 
 Get an individual comment if you know its ID::
@@ -285,7 +293,7 @@ Adding, editing and deleting comments is similarly straightforward::
     comment.delete()
 
 Transitions
-^^^^^^^^^^^
+-----------
 
 Learn what transitions are available on an issue::
 
@@ -328,7 +336,7 @@ It's no trouble to get the components, versions or roles either (assuming you ha
     [v.name for v in reversed(versions)]        # '5.1.1', '5.1', '5.0.7', '5.0.6', etc.
 
 jirashell
-=========
+*********
 
 There is no substitute for play. The only way to really know a service, an API or a package is to explore it, poke at
 it, and bang your elbows -- trial and error. A REST design is especially well-suited to active exploration, and the
@@ -392,16 +400,16 @@ Since the *Resource* class maps the server's JSON response directly into a Pytho
 see exactly what's in your resources.
 
 Advanced
-========
+********
 
 Resource Objects and Properties
--------------------------------
+===============================
 
 The library distinguishes between two kinds of data in the JIRA REST API: *resources* and *properties*.
 
 A *resource* is a REST entity that represents the current state of something that the server owns; for example,
 the issue called "ABC-123" is a concept managed by JIRA which can be viewed as a resource obtainable at the URL
-*http://jira-server/rest/api/2/issue/ABC-123*. All resources have a *self link*: a root-level property called *self*
+*http://jira-server/rest/api/latest/issue/ABC-123*. All resources have a *self link*: a root-level property called *self*
 which contains the URL the resource originated from. In jira-python, resources are instances of the *Resource* object
 (or one of its subclasses) and can only be obtained from the server using the ``find()`` method. Resources may be
 connected to other resources: the issue *Resource* is connected to a user *Resource* through the ``assignee`` and
@@ -415,14 +423,14 @@ connected to other resources: the issue *Resource* is connected to a user *Resou
 
 A *properties object* is a collection of values returned by JIRA in response to some query from the REST API. Their
 structure is freeform and modeled as a Python dict. Client methods return this structure for calls that do not
-produce resources. For example, the properties returned from the URL *http://jira-server/rest/api/2/issue/createmeta*
+produce resources. For example, the properties returned from the URL *http://jira-server/rest/api/latest/issue/createmeta*
 are designed to inform users what fields (and what values for those fields) are required to successfully create
 issues in the server's projects. Since these properties are determined by JIRA's configuration, they are not resources.
 
 The JIRA client's methods document whether they will return a *Resource* or a properties object.
 
 Contributing
-============
+************
 
 The client is an open source project under the BSD license. Contributions of any kind are welcome!
 
@@ -432,7 +440,7 @@ If you find a bug or have an idea for a useful feature, file it at that bitbucke
 code patches -- fork and send a pull request.
 
 Discussion and support
-----------------------
+======================
 
 We encourage all who wish to discuss by using https://answers.atlassian.com/questions/topics/754366/jira-python
 
@@ -448,7 +456,7 @@ API Documentation
     :show-inheritance:
 
 Indices and tables
-==================
+******************
 
 * :ref:`genindex`
 * :ref:`modindex`

@@ -8,13 +8,50 @@ into usable objects.
 
 import re
 import logging
+try:  # Python 2.7+
+    from logging import NullHandler
+except ImportError:
+    class NullHandler(logging.Handler):
+
+        def emit(self, record):
+            pass
 import json
 from datetime import datetime
 from operator import attrgetter
 from six import iteritems, string_types, text_type
 
-from .utils import threaded_requests, json_loads, get_error_list, CaseInsensitiveDict, IssueHistory, get_utc
+from .utils import (threaded_requests, json_loads, CaseInsensitiveDict,
+                    IssueHistory, get_utc)
+logging.getLogger('jira').addHandler(NullHandler())
 
+
+def get_error_list(r):
+    error_list = []
+    if r.status_code >= 400:
+        if r.status_code == 403 and "x-authentication-denied-reason" in r.headers:
+            error_list = [r.headers["x-authentication-denied-reason"]]
+        elif r.text:
+            try:
+                response = json_loads(r)
+                if 'message' in response:
+                    # JIRA 5.1 errors
+                    error_list = [response['message']]
+                elif 'errorMessages' in response and len(response['errorMessages']) > 0:
+                    # JIRA 5.0.x error messages sometimes come wrapped in this array
+                    # Sometimes this is present but empty
+                    errorMessages = response['errorMessages']
+                    if isinstance(errorMessages, (list, tuple)):
+                        error_list = errorMessages
+                    else:
+                        error_list = [errorMessages]
+                elif 'errors' in response and len(response['errors']) > 0:
+                    # JIRA 6.x error messages are found in this array.
+                    error_list = response['errors'].values()
+                else:
+                    error_list = [r.text]
+            except ValueError:
+                error_list = [r.text]
+    return error_list
 
 class Resource(object):
 
@@ -42,15 +79,18 @@ class Resource(object):
     ``ids`` parameter to ``find()``.
     """
 
+    JIRA_BASE_URL = '{server}/rest/{rest_path}/{rest_api_version}/{path}'
+
     # A prioritized list of the keys in self.raw most likely to contain a human
     # readable name or identifier, or that offer other key information.
     _READABLE_IDS = ('displayName', 'key', 'name', 'filename', 'value',
                      'scope', 'votes', 'id', 'mimeType', 'closed')
 
-    def __init__(self, resource, options, session):
+    def __init__(self, resource, options, session, base_url=JIRA_BASE_URL):
         self._resource = resource
         self._options = options
         self._session = session
+        self._base_url = base_url
 
         # Explicitly define as None so we know when a resource has actually
         # been loaded
@@ -124,14 +164,17 @@ class Resource(object):
         if params is None:
             params = {}
 
-        url = '{server}/rest/{rest_path}/{rest_api_version}/'.format(
-            **self._options)
         if isinstance(id, tuple):
-            url += self._resource.format(*id)
+            path = self._resource.format(*id)
         else:
-            url += self._resource.format(id)
-
+            path = self._resource.format(id)
+        url = self._get_url(path)
         self._load(url, params=params)
+
+    def _get_url(self, path):
+        options = self._options.copy()
+        options.update({'path': path})
+        return self._base_url.format(**options)
 
     def update(self, fields=None, async=None, jira=None, **kwargs):
         """
@@ -232,13 +275,15 @@ class Resource(object):
         else:
             r = self._session.delete(url=self.self, params=params)
 
-    def _load(self, url, headers=CaseInsensitiveDict(), params=None):
+    def _load(self, url, headers=CaseInsensitiveDict(), params=None, path=None):
         r = self._session.get(url, headers=headers, params=params)
         try:
             j = json_loads(r)
         except ValueError as e:
             logging.error("%s:\n%s" % (e, r.text))
             raise e
+        if path:
+            j = j[path]
         self._parse_raw(j)
 
     def _parse_raw(self, raw):
@@ -266,6 +311,13 @@ class Attachment(Resource):
         """
         r = self._session.get(self.content)
         return r.content
+
+    def iter_content(self, chunk_size=1024):
+        """
+        Returns the file content as an iterable stream.
+        """
+        r = self._session.get(self.content, stream=True)
+        return r.iter_content(chunk_size)
 
 
 class Component(Resource):
@@ -321,16 +373,41 @@ class Filter(Resource):
 
 
 class Issue(Resource):
-
     """A JIRA issue."""
+
+    class _IssueFields:
+
+        def __init__(self):
+            self.attachment = None
+            """ :type : list[Attachment] """
+            self.description = None
+            """ :type : str """
+            self.project = None
+            """ :type : Project """
+            self.comment = None
+            """ :type : list[Comment] """
+            self.issuelinks = None
+            """ :type : list[IssueLink] """
+            self.worklog = None
+            """ :type : list[Worklog] """
 
     def __init__(self, options, session, raw=None):
         Resource.__init__(self, 'issue/{0}', options, session)
+<<<<<<< HEAD
         self._labels = None
+=======
+
+        self.fields = None
+        """ :type : Issue._IssueFields """
+        self.id = None
+        """ :type : int """
+        self.key = None
+        """ :type : str """
+>>>>>>> upstream/master
         if raw:
             self._parse_raw(raw)
 
-    def update(self, fields=None, async=None, jira=None, **fieldargs):
+    def update(self, fields=None, update=None, async=None, jira=None, **fieldargs):
         """
         Update this issue on the server.
 
@@ -342,17 +419,43 @@ class Issue(Resource):
         fields in an issue. This information is available through the :py:meth:`.JIRA.editmeta` method. Further examples
         are available here: https://developer.atlassian.com/display/JIRADEV/JIRA+REST+API+Example+-+Edit+issues
 
-        :param fields: a dict containing field names and the values to use; if present, all other keyword arguments\
-        will be ignored
+        :param fields: a dict containing field names and the values to use
+
+        :param update: a dict containing update operations to apply
+
+        keyword arguments will generally be merged into fields, except lists, which will be merged into updates
         """
         data = {}
         if fields is not None:
-            data['fields'] = fields
+            fields_dict = fields
         else:
             fields_dict = {}
-            for field in fieldargs:
-                fields_dict[field] = fieldargs[field]
-            data['fields'] = fields_dict
+        data['fields'] = fields_dict
+        if update is not None:
+            update_dict = update
+        else:
+            update_dict = {}
+        data['update'] = update_dict
+        for field in sorted(fieldargs.keys()):
+            value = fieldargs[field]
+            # apply some heuristics to make certain changes easier
+            if isinstance(value, string_types):
+                if field == 'assignee' or field == 'reporter':
+                    fields_dict['assignee'] = {'name': value}
+                elif field == 'comment':
+                    if 'comment' not in update_dict:
+                        update_dict['comment'] = []
+                    update_dict['comment'].append({
+                        'add': {'body': value}
+                    })
+                else:
+                    fields_dict[field] = value
+            elif isinstance(value, list):
+                if field not in update_dict:
+                    update_dict[field] = []
+                update_dict[field].extend(value)
+            else:
+                fields_dict[field] = value
 
         super(Issue, self).update(async=async, jira=jira, fields=data)
 
@@ -813,6 +916,12 @@ class User(Resource):
         if raw:
             self._parse_raw(raw)
 
+    def __hash__(self):
+        return hash(str(self.name))
+
+    def __eq__(self, other):
+        return str(self.name) == str(other.name)
+
 
 class Version(Resource):
 
@@ -852,6 +961,9 @@ class Version(Resource):
 
         super(Version, self).update(**data)
 
+    def __eq__(self, other):
+        return self.id == other.id and self.name == other.name
+
 
 # GreenHopper
 
@@ -860,35 +972,56 @@ class GreenHopperResource(Resource):
 
     """A generic GreenHopper resource."""
 
+    AGILE_BASE_URL = '{server}/rest/{agile_rest_path}/{agile_rest_api_version}/{path}'
+
+    GREENHOPPER_REST_PATH = "greenhopper"
+    """ Old, private API. Deprecated and will be removed from JIRA on the 1st February 2016. """
+    AGILE_EXPERIMENTAL_REST_PATH = "greenhopper/experimental-api"
+    """ Experimental API available in JIRA Agile 6.7.3 - 6.7.6, basically the same as Public API """
+    AGILE_BASE_REST_PATH = "agile"
+    """ Public API introduced in JIRA Agile 6.7.7. """
+
     def __init__(self, path, options, session, raw):
-        Resource.__init__(self, path, options, session)
+        self.self = None
+
+        Resource.__init__(self, path, options, session, self.AGILE_BASE_URL)
         if raw:
             self._parse_raw(raw)
-        url = '{server}/rest/greenhopper/1.0/'.format(**self._options)
-        url += path.format(**raw)
-        self.self = url
+            # Old GreenHopper API did not contain self - create it for backward compatibility.
+            if not self.self:
+                self.self = self._get_url(path.format(raw['id']))
 
 
 class Sprint(GreenHopperResource):
 
     """A GreenHopper sprint."""
 
-    def __init__(self, options, session, raw):
-        GreenHopperResource.__init__(
-            self, 'sprint/{id}', options, session, raw)
-        if raw:
-            self._parse_raw(raw)
+    def __init__(self, options, session, raw=None):
+        GreenHopperResource.__init__(self, 'sprint/{0}', options, session, raw)
+
+    def find(self, id, params=None):
+        if self._options['agile_rest_path'] != GreenHopperResource.GREENHOPPER_REST_PATH:
+            Resource.find(self, id, params)
+        else:
+            # Old, private GreenHopper API had non-standard way of loading Sprint
+            url = self._get_url('sprint/%s/edit/model' % id)
+            self._load(url, params=params, path='sprint')
 
 
 class Board(GreenHopperResource):
 
     """A GreenHopper board."""
 
-    def __init__(self, options, session, raw):
-        GreenHopperResource.__init__(
-            self, 'rapidview/{id}', options, session, raw)
-        if raw:
-            self._parse_raw(raw)
+    def __init__(self, options, session, raw=None):
+        path = 'rapidview/{0}' if options['agile_rest_path'] == self.GREENHOPPER_REST_PATH else 'board/{id}'
+        GreenHopperResource.__init__(self, path, options, session, raw)
+
+    def delete(self, params=None):
+        if self._options['agile_rest_path'] != GreenHopperResource.GREENHOPPER_REST_PATH:
+            raise NotImplementedError('JIRA Agile Public API does not support Board removal')
+
+        Resource.delete(self, params)
+
 
 # Utilities
 

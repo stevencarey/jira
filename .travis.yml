@@ -1,4 +1,5 @@
 language: python
+sudo: false
 os:
 - linux
 python:
@@ -6,6 +7,7 @@ python:
 - '2.7'
 - '3.3'
 - '3.4'
+- '3.5'
 install:
 - pip -q install -r requirements.txt
 - pip -q install -r requirements-dev.txt
@@ -15,7 +17,7 @@ install:
 - pip -q install ordereddict || echo "optional skipped"
 - pip -q install coveralls
 script:
-- curl --silent -Lo travis_after_all.py https://raw.github.com/pycontribs/travis_after_all/master/travis_after_all.py && travis_wait python setup.py prerelease test
+- curl --silent -Lo travis_after_all.py https://raw.github.com/pycontribs/travis_after_all/master/travis_after_all.py && travis_wait python setup.py test
 - export PACKAGE_VERSION=$(python -c "from jira.version import __version__; print(__version__)")
 after_success:
   - python travis_after_all.py
@@ -29,6 +31,7 @@ after_success:
         fi
       fi
   - coveralls
+  - travis_wait python setup.py prerelease
   - python setup.py build_sphinx upload_docs sdist bdist_wheel
 after_failure:
   - python travis_after_all.py
@@ -57,12 +60,14 @@ deploy:
     file: "dist/jira-$PACKAGE_VERSION.tar.gz"
     skip_cleanup: true
     on:
-      tags: true
       condition: "$BUILD_LEADER = YES"
   - provider: pypi
     user: sorin
     password:
       secure: "E0cjANF7SLBdYrsnWLK8X/xWznqkF0JrP/DVfDazPzUYH6ynFeneyofzNJQPLTLsqe1eKXhuUJ/Sbl+RHFB0ySo/j/7NfYd/9pm8hpUkGCvR09IwtvMLgWKp3k10NWab03o2GOkSJSrLvZofyZBGR40wwu2O9uXPCb2rvucCGbw="
     distributions: "sdist bdist_wheel"
+    on:
+      condition: "$BUILD_LEADER = YES"
 after_deploy:
-  - echo "after deploy..."
+  - echo "Now we only have to increase the version number, tag the changset and push..."
+  - ./release.sh
